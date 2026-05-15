@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "configurePresets": [
+    {
+      "name": "vcpkg-vs2019",
+      "hidden": true,
+      "generator": "Visual Studio 16 2019",
+      "architecture": "x64",
+      "toolset": "host=x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "Z_VCPKG_POWERSHELL_PATH": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "QT_PREFIX": "E:/DevEnvs/qt/5.15.2/msvc2019_64"
+      },
+      "environment": {
+        "VCPKG_ROOT": "E:/DevEnvs/cpp/vcpkg",
+        "PATH": "$penv{PATH};C:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "vcpkg-vs2019",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDebugDLL"
+
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "vcpkg-vs2019",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "configuration": "Debug"   
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "configuration": "Release"  
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+services:
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build
+      network: host
+
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    volumes:
+      - .:/src/cppmcp
+      - vcpkg_installed:/opt/vcpkg/installed
+    working_dir: /src/cppmcp
+
+volumes:
+  vcpkg_installed:

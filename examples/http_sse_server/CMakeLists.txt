@@ -1,0 +1,2 @@
+add_executable(http_sse_server main.cpp)
+target_link_libraries(http_sse_server PRIVATE cppmcp_lib)

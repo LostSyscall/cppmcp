@@ -1,0 +1,2 @@
+add_executable(simple_stdio_server main.cpp)
+target_link_libraries(simple_stdio_server PRIVATE cppmcp_lib)

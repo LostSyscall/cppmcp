@@ -1,0 +1,4 @@
+add_subdirectory(simple_stdio_server)
+add_subdirectory(http_sse_server)
+add_subdirectory(streamable_http_server)
+add_subdirectory(local_pipe_server)
