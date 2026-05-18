@@ -2,17 +2,10 @@
 #include <cppmcp/local_pipe_transport.hpp>
 #include <cppmcp/types.hpp>
 
-#include <csignal>
 #include <iostream>
 
 using namespace cppmcp;
 using json = nlohmann::json;
-
-static McpServer* g_server = nullptr;
-
-void signal_handler(int) {
-    if (g_server) g_server->stop();
-}
 
 int main() {
     Implementation info{"cppmcp_pipe_example", "1.0.0"};
@@ -76,10 +69,6 @@ int main() {
 
     auto transport = std::make_shared<LocalPipeTransport>(config);
     server.connect(transport);
-
-g_server = &server;
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
 
 #ifdef _WIN32
     std::cerr << R"([cppmcp_pipe_example] Starting local pipe MCP server on \\.\pipe\cppmcp_mcp...)" << std::endl;

@@ -7,46 +7,145 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+// thread_local: response routing for local pipe connections
+static thread_local std::shared_ptr<cppmcp::PipeConnection> tl_responding_conn;
 
 namespace cppmcp {
 
-// --- Helper: resolve pipe path ---
-std::string LocalPipeTransport::resolve_pipe_path() const {
-    return std::string("\\\\.\\pipe\\") + config_.pipe_name;
+// --- PipeConnection ---
+#ifdef _WIN32
+PipeConnection::PipeConnection(asio::io_context& io_ctx, int id)
+    : stream_handle(io_ctx), connection_id(id) {}
+#else
+PipeConnection::PipeConnection(asio::local::stream_protocol::socket s, int id)
+    : socket(std::move(s)), connection_id(id) {}
+#endif
+
+void PipeConnection::start_read() {
+#ifdef _WIN32
+    asio::async_read(stream_handle, read_buf, asio::transfer_at_least(1),
+        [this](const asio::error_code& ec, std::size_t bytes_transferred) {
+            if (ec) {
+                active = false;
+                std::cerr << "[cppmcp] Client #" << connection_id << " disconnected" << std::endl;
+                return;
+            }
+
+            auto bufs = read_buf.data();
+            auto begin = asio::buffers_begin(bufs);
+            auto end = begin + bytes_transferred;
+            std::string data(begin, end);
+            read_buf.consume(bytes_transferred);
+
+            while (!data.empty() && (data.back() == '\n' || data.back() == '\r')) {
+                data.pop_back();
+            }
+
+            if (!data.empty()) {
+                handle_line(data);
+            }
+
+            if (active) {
+                start_read();
+            }
+        });
+#else
+    asio::async_read_until(socket, read_buf, '\n',
+        [this](const asio::error_code& ec, std::size_t bytes_transferred) {
+            if (ec) {
+                active = false;
+                std::cerr << "[cppmcp] Client #" << connection_id << " disconnected" << std::endl;
+                return;
+            }
+
+            std::string line;
+            line.reserve(bytes_transferred);
+            auto bufs = read_buf.data();
+            for (auto it = asio::buffers_begin(bufs); it != asio::buffers_begin(bufs) + bytes_transferred; ++it) {
+                line += *it;
+            }
+            read_buf.consume(bytes_transferred);
+
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+                line.pop_back();
+            }
+
+            if (!line.empty()) {
+                handle_line(line);
+            }
+
+            if (active) {
+                start_read();
+            }
+        });
+#endif
 }
 
-// --- LocalPipeConnection (overlapped write) ---
-bool LocalPipeConnection::write_message(const std::string& data) {
-    std::lock_guard<std::mutex> lock(write_mutex);
-    if (handle == INVALID_HANDLE || !write_event) return false;
-
-    HANDLE h = static_cast<HANDLE>(handle);
-    HANDLE evt = static_cast<HANDLE>(write_event);
-    ResetEvent(evt);
-
-    OVERLAPPED ov = {};
-    ov.hEvent = evt;
-
-    DWORD bytes_written = 0;
-    BOOL result = WriteFile(h, data.c_str(), static_cast<DWORD>(data.size()),
-                            &bytes_written, &ov);
-
-    DWORD last_error = GetLastError();
-
-    if (result) {
-        // Write completed immediately
-        return bytes_written == static_cast<DWORD>(data.size());
-    }
-
-    if (last_error == ERROR_IO_PENDING) {
-        DWORD transferred = 0;
-        if (GetOverlappedResult(h, &ov, &transferred, TRUE)) {
-            return transferred == static_cast<DWORD>(data.size());
+void PipeConnection::handle_line(const std::string& line) {
+    try {
+        auto json_msg = nlohmann::json::parse(line);
+        tl_responding_conn = std::shared_ptr<PipeConnection>(this, [](PipeConnection*){});  // non-owning
+        if (message_handler) {
+            message_handler(json_msg);
         }
-        return false;
+        tl_responding_conn = nullptr;
+    } catch (const nlohmann::json::parse_error& e) {
+        auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());
+        tl_responding_conn = std::shared_ptr<PipeConnection>(this, [](PipeConnection*){});
+        enqueue_write(error_resp.dump());
+        tl_responding_conn = nullptr;
+        if (error_handler) {
+            error_handler("JSON parse error: " + std::string(e.what()));
+        }
+    } catch (const std::exception& e) {
+        if (error_handler) {
+            error_handler("Error processing message: " + std::string(e.what()));
+        }
+    }
+}
+
+void PipeConnection::enqueue_write(std::string data) {
+    data += "\n";
+
+    bool was_empty;
+    {
+        std::lock_guard<std::mutex> lock(write_mutex);
+        was_empty = write_queue.empty();
+        write_queue.push_back(std::move(data));
+    }
+    if (was_empty) {
+        start_write();
+    }
+}
+
+void PipeConnection::start_write() {
+    auto data_ptr = std::make_shared<std::string>();
+    {
+        std::lock_guard<std::mutex> lock(write_mutex);
+        if (write_queue.empty() || !active) return;
+        *data_ptr = std::move(write_queue.front());
+        write_queue.pop_front();
     }
 
-    return false;
+#ifdef _WIN32
+    asio::async_write(stream_handle, asio::buffer(*data_ptr),
+        [this, data_ptr](const asio::error_code& ec, std::size_t) {
+            if (ec) { active = false; return; }
+            std::lock_guard<std::mutex> lock(write_mutex);
+            if (!write_queue.empty() && active) start_write();
+        });
+#else
+    asio::async_write(socket, asio::buffer(*data_ptr),
+        [this, data_ptr](const asio::error_code& ec, std::size_t) {
+            if (ec) { active = false; return; }
+            std::lock_guard<std::mutex> lock(write_mutex);
+            if (!write_queue.empty() && active) start_write();
+        });
+#endif
 }
 
 // --- LocalPipeTransport ---
@@ -57,27 +156,38 @@ LocalPipeTransport::~LocalPipeTransport() {
     stop();
 }
 
-void LocalPipeTransport::start() {
-    running_ = true;
-    accept_event_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);  // Manual-reset, initially non-signaled
-    if (!accept_event_) {
-        if (error_handler_) {
-            error_handler_("CreateEvent failed for accept");
-        }
-        running_ = false;
-        return;
-    }
-    accept_thread_ = std::thread(&LocalPipeTransport::accept_loop, this);
-    std::cerr << "[cppmcp] Local pipe server starting on " << resolve_pipe_path()
-              << " (mode: " << (config_.mode == PipeMode::SingleClient ? "SingleClient" : "MultiClient")
-              << ", overlapped async)" << std::endl;
+void LocalPipeTransport::set_io_context(asio::io_context* io_ctx) {
+    io_ctx_ = io_ctx;
 }
 
-void LocalPipeTransport::accept_loop() {
+std::string LocalPipeTransport::resolve_pipe_path() const {
+#ifdef _WIN32
+    return std::string("\\\\.\\pipe\\") + config_.pipe_name;
+#else
+    return std::string("/tmp/") + config_.pipe_name + ".sock";
+#endif
+}
+
+#ifdef _WIN32
+// --- Windows: thin accept thread + asio stream_handle ---
+void LocalPipeTransport::start() {
+    if (!io_ctx_) {
+        if (error_handler_) error_handler_("LocalPipeTransport: no io_context set");
+        return;
+    }
+
+    running_ = true;
+    win32_accept_thread_ = std::thread(&LocalPipeTransport::win32_accept_loop, this);
+
+    std::cerr << "[cppmcp] Local pipe server starting on " << resolve_pipe_path()
+              << " (mode: " << (config_.mode == PipeMode::SingleClient ? "SingleClient" : "MultiClient")
+              << ", asio async)" << std::endl;
+}
+
+void LocalPipeTransport::win32_accept_loop() {
     std::string path = resolve_pipe_path();
 
     while (running_) {
-        // Create pipe instance with overlapped flag
         HANDLE h = CreateNamedPipeA(
             path.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
@@ -91,40 +201,27 @@ void LocalPipeTransport::accept_loop() {
 
         if (h == INVALID_HANDLE_VALUE) {
             DWORD err = GetLastError();
-            if (err == ERROR_CANNOT_MAKE) {
-                std::unique_lock<std::mutex> lock(stop_mutex_);
-                stop_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms),
-                                  [this] { return !running_.load(); });
-                continue;
-            }
-            if (error_handler_) {
-                error_handler_("CreateNamedPipe failed: " + std::to_string(err));
-            }
-            std::unique_lock<std::mutex> lock(stop_mutex_);
-            stop_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms),
-                              [this] { return !running_.load(); });
+            if (error_handler_) error_handler_("CreateNamedPipe failed: " + std::to_string(err));
+            if (!running_) break;
+            Sleep(500);
             continue;
         }
 
-        // Overlapped ConnectNamedPipe
-        ResetEvent(static_cast<HANDLE>(accept_event_));
+        HANDLE accept_evt = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if (!accept_evt) { CloseHandle(h); continue; }
+
         OVERLAPPED ov = {};
-        ov.hEvent = static_cast<HANDLE>(accept_event_);
+        ov.hEvent = accept_evt;
 
         BOOL connected = ConnectNamedPipe(h, &ov);
         DWORD last_error = GetLastError();
+        bool got_connection = false;
 
-        if (connected) {
-            // Connected immediately (rare — client connected before our call)
-        } else if (last_error == ERROR_PIPE_CONNECTED) {
-            // Client already connected between CreateNamedPipe and ConnectNamedPipe
+        if (connected || last_error == ERROR_PIPE_CONNECTED) {
+            got_connection = true;
         } else if (last_error == ERROR_IO_PENDING) {
-            // Async connect pending — wait with periodic running_ check
-            bool got_connection = false;
             while (running_) {
-                DWORD wait_result = WaitForSingleObjectEx(
-                    static_cast<HANDLE>(accept_event_), config_.poll_interval_ms, TRUE);
-
+                DWORD wait_result = WaitForSingleObjectEx(accept_evt, 500, TRUE);
                 if (wait_result == WAIT_OBJECT_0) {
                     DWORD bytes_transferred = 0;
                     if (GetOverlappedResult(h, &ov, &bytes_transferred, FALSE)) {
@@ -132,237 +229,62 @@ void LocalPipeTransport::accept_loop() {
                         break;
                     }
                     DWORD err = GetLastError();
-                    if (err == ERROR_OPERATION_ABORTED) {
-                        CloseHandle(h);
-                        break;
-                    }
+                    if (err == ERROR_OPERATION_ABORTED) { CloseHandle(h); break; }
                     CloseHandle(h);
-                    if (error_handler_) {
-                        error_handler_("ConnectNamedPipe async failed: " + std::to_string(err));
-                    }
+                    if (error_handler_) error_handler_("ConnectNamedPipe async failed: " + std::to_string(err));
                     break;
                 }
                 if (wait_result == WAIT_TIMEOUT) {
                     if (!running_) {
                         CancelIoEx(h, &ov);
-                        WaitForSingleObjectEx(static_cast<HANDLE>(accept_event_), 100, TRUE);
+                        WaitForSingleObjectEx(accept_evt, 100, TRUE);
                         CloseHandle(h);
                         break;
                     }
                     continue;
                 }
-                // WAIT_FAILED
                 CloseHandle(h);
-                if (error_handler_) {
-                    error_handler_("WaitForSingleObjectEx failed in accept");
-                }
                 break;
             }
-            if (!running_) break;
-            if (!got_connection) continue;
         } else {
-            // Unexpected error
             CloseHandle(h);
-            if (error_handler_) {
-                error_handler_("ConnectNamedPipe failed: " + std::to_string(last_error));
-            }
-            continue;
+            if (error_handler_) error_handler_("ConnectNamedPipe failed: " + std::to_string(last_error));
         }
 
-        if (!running_) {
-            CloseHandle(h);
-            break;
-        }
+        CloseHandle(accept_evt);
 
-        // Client connected
+        if (!running_) break;
+        if (!got_connection) continue;
+
+        // Client connected — post handle assignment into asio event loop
         int conn_id = next_connection_id_++;
-        auto conn = std::make_shared<LocalPipeConnection>(h, conn_id);
-        conn->active = true;
-        conn->read_event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-        conn->write_event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        asio::post(*io_ctx_, [this, h, conn_id]() {
+            auto conn = std::make_shared<PipeConnection>(*io_ctx_, conn_id);
+            conn->active = true;
+            conn->message_handler = message_handler_;
+            conn->error_handler = error_handler_;
 
-        {
-            std::lock_guard<std::mutex> lock(connections_mutex_);
-            active_connections_.push_back(conn);
-        }
+            asio::error_code ec;
+            conn->stream_handle.assign(h, ec);
+            if (ec) {
+                CloseHandle(h);
+                if (error_handler_) error_handler_("Failed to assign pipe handle: " + ec.message());
+                return;
+            }
 
-        conn->reader_thread = std::thread([this, conn]() {
-            client_read_loop(conn);
+            {
+                std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+                active_connections_.push_back(conn);
+            }
+
+            conn->start_read();
+            std::cerr << "[cppmcp] Client #" << conn_id << " connected on pipe" << std::endl;
         });
 
-        std::cerr << "[cppmcp] Client #" << conn_id << " connected on pipe " << path << std::endl;
-
         if (config_.mode == PipeMode::SingleClient) {
-            std::unique_lock<std::mutex> lock(stop_mutex_);
-            stop_cv_.wait(lock, [this] { return !running_.load(); });
+            while (running_.load()) { Sleep(500); }
             break;
         }
-        // MultiClient: loop continues creating next instance
-    }
-
-    if (accept_event_) {
-        CloseHandle(static_cast<HANDLE>(accept_event_));
-        accept_event_ = nullptr;
-    }
-}
-
-std::string LocalPipeTransport::read_message(std::shared_ptr<LocalPipeConnection> conn) {
-    // Overlapped message-mode read: ReadFile returns one pipe message per call
-    HANDLE h = static_cast<HANDLE>(conn->handle);
-    HANDLE evt = static_cast<HANDLE>(conn->read_event);
-    std::string result;
-    std::vector<char> buffer(config_.buffer_size);
-
-    ResetEvent(evt);
-    OVERLAPPED ov = {};
-    ov.hEvent = evt;
-
-    DWORD bytes_read = 0;
-    BOOL success = ReadFile(h, buffer.data(), static_cast<DWORD>(buffer.size()),
-                            &bytes_read, &ov);
-
-    DWORD last_error = GetLastError();
-
-    if (success) {
-        // Read completed immediately
-        result.append(buffer.data(), bytes_read);
-    } else if (last_error == ERROR_IO_PENDING) {
-        // Async read pending — wait with periodic running_ check
-        bool read_complete = false;
-        while (running_ && conn->active.load()) {
-            DWORD wait_result = WaitForSingleObjectEx(evt, config_.poll_interval_ms, TRUE);
-            if (wait_result == WAIT_OBJECT_0) {
-                DWORD transferred = 0;
-                if (GetOverlappedResult(h, &ov, &transferred, FALSE)) {
-                    result.append(buffer.data(), transferred);
-                    read_complete = true;
-                    break;
-                }
-                DWORD err = GetLastError();
-                if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED ||
-                    err == ERROR_OPERATION_ABORTED) {
-                    return "";
-                }
-                if (error_handler_) {
-                    error_handler_("Overlapped read failed: " + std::to_string(err));
-                }
-                return "";
-            }
-            if (wait_result == WAIT_TIMEOUT) {
-                if (!running_ || !conn->active.load()) {
-                    CancelIoEx(h, &ov);
-                    WaitForSingleObjectEx(evt, 100, TRUE);
-                    return "";
-                }
-                continue;
-            }
-            // WAIT_FAILED
-            return "";
-        }
-        if (!read_complete) return "";
-    } else if (last_error == ERROR_BROKEN_PIPE || last_error == ERROR_PIPE_NOT_CONNECTED) {
-        return "";
-    } else {
-        if (error_handler_) {
-            error_handler_("ReadFile failed: " + std::to_string(last_error));
-        }
-        return "";
-    }
-
-    // Read remaining fragments if message was larger than buffer
-    while (GetLastError() == ERROR_MORE_DATA) {
-        ResetEvent(evt);
-        OVERLAPPED ov2 = {};
-        ov2.hEvent = evt;
-        DWORD more_bytes = 0;
-        BOOL more_success = ReadFile(h, buffer.data(), static_cast<DWORD>(buffer.size()),
-                                     &more_bytes, &ov2);
-        DWORD more_error = GetLastError();
-        if (more_success) {
-            result.append(buffer.data(), more_bytes);
-        } else if (more_error == ERROR_IO_PENDING) {
-            DWORD transferred = 0;
-            if (GetOverlappedResult(h, &ov2, &transferred, TRUE)) {
-                result.append(buffer.data(), transferred);
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    return result;
-}
-
-void LocalPipeTransport::client_read_loop(std::shared_ptr<LocalPipeConnection> conn) {
-    while (running_ && conn->active.load()) {
-        std::string message = read_message(conn);
-
-        if (message.empty()) {
-            conn->active = false;
-            break;
-        }
-
-        try {
-            auto json_msg = nlohmann::json::parse(message);
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = conn;
-            }
-            if (message_handler_) {
-                message_handler_(json_msg);
-            }
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = nullptr;
-            }
-        } catch (const nlohmann::json::parse_error& e) {
-            auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = conn;
-            }
-            conn->write_message(error_resp.dump());
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = nullptr;
-            }
-            if (error_handler_) {
-                error_handler_("JSON parse error: " + std::string(e.what()));
-            }
-        } catch (const std::exception& e) {
-            if (error_handler_) {
-                error_handler_("Error processing message: " + std::string(e.what()));
-            }
-        }
-    }
-
-    std::cerr << "[cppmcp] Client #" << conn->connection_id << " disconnected" << std::endl;
-
-    // Clean up pipe handle and overlapped events
-    if (conn->handle != LocalPipeConnection::INVALID_HANDLE) {
-        HANDLE h = static_cast<HANDLE>(conn->handle);
-        FlushFileBuffers(h);
-        DisconnectNamedPipe(h);
-        CloseHandle(h);
-        conn->handle = LocalPipeConnection::INVALID_HANDLE;
-    }
-    if (conn->read_event) {
-        CloseHandle(static_cast<HANDLE>(conn->read_event));
-        conn->read_event = nullptr;
-    }
-    if (conn->write_event) {
-        CloseHandle(static_cast<HANDLE>(conn->write_event));
-        conn->write_event = nullptr;
-    }
-
-    // Remove from active connections
-    {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        active_connections_.erase(
-            std::remove(active_connections_.begin(), active_connections_.end(), conn),
-            active_connections_.end());
     }
 }
 
@@ -370,393 +292,124 @@ void LocalPipeTransport::stop() {
     if (!running_.load()) return;
     running_ = false;
 
-    // Signal stop condition variable (unblocks SingleClient wait)
-    stop_cv_.notify_all();
-
-    // Cancel I/O and close handles on all active connections
-    std::vector<std::shared_ptr<LocalPipeConnection>> connections_copy;
     {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        connections_copy = active_connections_;
-    }
-
-    for (auto& conn : connections_copy) {
-        conn->active = false;
-        if (conn->handle != LocalPipeConnection::INVALID_HANDLE) {
-            HANDLE h = static_cast<HANDLE>(conn->handle);
-            CancelIoEx(h, nullptr);
-            DisconnectNamedPipe(h);
-            CloseHandle(h);
-            conn->handle = LocalPipeConnection::INVALID_HANDLE;
+        std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+        for (auto& conn : active_connections_) {
+            conn->active = false;
+            asio::error_code ec;
+            conn->stream_handle.close(ec);
         }
-        // Signal read/write events to unblock any waiting threads
-        if (conn->read_event) {
-            SetEvent(static_cast<HANDLE>(conn->read_event));
-        }
-        if (conn->write_event) {
-            SetEvent(static_cast<HANDLE>(conn->write_event));
-        }
-    }
-
-    // Join reader threads
-    for (auto& conn : connections_copy) {
-        if (conn->reader_thread.joinable()) {
-            conn->reader_thread.join();
-        }
-        if (conn->read_event) {
-            CloseHandle(static_cast<HANDLE>(conn->read_event));
-            conn->read_event = nullptr;
-        }
-        if (conn->write_event) {
-            CloseHandle(static_cast<HANDLE>(conn->write_event));
-            conn->write_event = nullptr;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
         active_connections_.clear();
     }
 
-    // Signal accept event to unblock accept loop
-    if (accept_event_) {
-        SetEvent(static_cast<HANDLE>(accept_event_));
-    }
-
-    if (accept_thread_.joinable()) {
-        accept_thread_.join();
+    if (win32_accept_thread_.joinable()) {
+        win32_accept_thread_.join();
     }
 }
 
-bool LocalPipeTransport::is_running() const {
-    return running_.load();
-}
-
-void LocalPipeTransport::send_message(const nlohmann::json& message) {
-    std::string data = message.dump();
-
-    {
-        std::lock_guard<std::mutex> rlock(responding_mutex_);
-        if (responding_connection_ && responding_connection_->active.load()) {
-            responding_connection_->write_message(data);
-            return;
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(connections_mutex_);
-    for (auto& conn : active_connections_) {
-        if (conn->active.load()) {
-            conn->write_message(data);
-        }
-    }
-}
-
-void LocalPipeTransport::set_message_handler(MessageCallback handler) {
-    message_handler_ = std::move(handler);
-}
-
-void LocalPipeTransport::set_error_handler(ErrorCallback handler) {
-    error_handler_ = std::move(handler);
-}
-
-} // namespace cppmcp
-
-#else // Unix: Unix Domain Socket with poll-based async I/O
-
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-#include <poll.h>
-#include <cstring>
-#include <cerrno>
-
-namespace cppmcp {
-
-// --- Helper: resolve socket path ---
-std::string LocalPipeTransport::resolve_pipe_path() const {
-    return std::string("/tmp/") + config_.pipe_name + ".sock";
-}
-
-// --- LocalPipeConnection ---
-bool LocalPipeConnection::write_message(const std::string& data) {
-    std::lock_guard<std::mutex> lock(write_mutex);
-    if (handle == INVALID_HANDLE) return false;
-    std::string framed = data + "\n";
-    ssize_t total_sent = 0;
-    size_t remaining = framed.size();
-    while (remaining > 0) {
-        ssize_t sent = send(handle, framed.c_str() + total_sent, remaining, 0);
-        if (sent <= 0) return false;
-        total_sent += sent;
-        remaining -= static_cast<size_t>(sent);
-    }
-    return true;
-}
-
-// --- LocalPipeTransport ---
-LocalPipeTransport::LocalPipeTransport(const LocalPipeConfig& config)
-    : config_(config) {}
-
-LocalPipeTransport::~LocalPipeTransport() {
-    stop();
-}
-
+#else
+// --- Unix: asio local::stream_protocol ---
 void LocalPipeTransport::start() {
+    if (!io_ctx_) {
+        if (error_handler_) error_handler_("LocalPipeTransport: no io_context set");
+        return;
+    }
+
     running_ = true;
 
     std::string path = resolve_pipe_path();
     unlink(path.c_str());
 
-    listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (listen_fd_ < 0) {
-        if (error_handler_) {
-            error_handler_("socket() failed: " + std::string(strerror(errno)));
-        }
-        running_ = false;
-        return;
-    }
+    acceptor_ = std::make_unique<asio::local::stream_protocol::acceptor>(*io_ctx_);
+    asio::local::stream_protocol::endpoint endpoint(path);
 
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    asio::error_code ec;
+    acceptor_->open(endpoint.protocol(), ec);
+    if (ec) { if (error_handler_) error_handler_("open() failed: " + ec.message()); running_ = false; return; }
 
-    if (bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        if (error_handler_) {
-            error_handler_("bind() failed: " + std::string(strerror(errno)));
-        }
-        close(listen_fd_);
-        listen_fd_ = -1;
-        running_ = false;
-        return;
-    }
+    acceptor_->bind(endpoint, ec);
+    if (ec) { if (error_handler_) error_handler_("bind() failed: " + ec.message()); running_ = false; return; }
 
-    if (listen(listen_fd_, config_.max_instances) < 0) {
-        if (error_handler_) {
-            error_handler_("listen() failed: " + std::string(strerror(errno)));
-        }
-        close(listen_fd_);
-        listen_fd_ = -1;
-        running_ = false;
-        return;
-    }
+    acceptor_->listen(config_.max_instances, ec);
+    if (ec) { if (error_handler_) error_handler_("listen() failed: " + ec.message()); running_ = false; return; }
 
-    accept_thread_ = std::thread(&LocalPipeTransport::accept_loop, this);
+    do_accept();
+
     std::cerr << "[cppmcp] Local pipe server starting on " << path
               << " (mode: " << (config_.mode == PipeMode::SingleClient ? "SingleClient" : "MultiClient")
-              << ", poll-based async)" << std::endl;
+              << ", asio async)" << std::endl;
 }
 
-void LocalPipeTransport::accept_loop() {
-    while (running_) {
-        struct pollfd pfd;
-        pfd.fd = listen_fd_;
-        pfd.events = POLLIN;
-
-        int poll_result = poll(&pfd, 1, config_.poll_interval_ms);
-        if (poll_result < 0) {
-            if (errno != EINTR) {
-                if (error_handler_) {
-                    error_handler_("poll() failed: " + std::string(strerror(errno)));
-                }
+void LocalPipeTransport::do_accept() {
+    acceptor_->async_accept(
+        [this](const asio::error_code& ec, asio::local::stream_protocol::socket socket) {
+            if (ec) {
+                if (running_) do_accept();
+                return;
             }
-            continue;
-        }
 
-        if (poll_result == 0) continue;
+            if (!running_) { socket.close(); return; }
 
-        int client_fd = accept(listen_fd_, nullptr, nullptr);
-        if (client_fd < 0) {
-            if (error_handler_) {
-                error_handler_("accept() failed: " + std::string(strerror(errno)));
+            int conn_id = next_connection_id_++;
+            auto conn = std::make_shared<PipeConnection>(std::move(socket), conn_id);
+            conn->active = true;
+            conn->message_handler = message_handler_;
+            conn->error_handler = error_handler_;
+
+            {
+                std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+                active_connections_.push_back(conn);
             }
-            continue;
-        }
 
-        if (!running_) {
-            close(client_fd);
-            break;
-        }
+            conn->start_read();
+            std::cerr << "[cppmcp] Client #" << conn_id << " connected" << std::endl;
 
-        int conn_id = next_connection_id_++;
-        auto conn = std::make_shared<LocalPipeConnection>(client_fd, conn_id);
-        conn->active = true;
+            if (config_.mode == PipeMode::SingleClient) return;
 
-        {
-            std::lock_guard<std::mutex> lock(connections_mutex_);
-            active_connections_.push_back(conn);
-        }
-
-        conn->reader_thread = std::thread([this, conn]() {
-            client_read_loop(conn);
+            if (running_) do_accept();
         });
-
-        std::cerr << "[cppmcp] Client #" << conn_id << " connected on socket "
-                  << resolve_pipe_path() << std::endl;
-
-        if (config_.mode == PipeMode::SingleClient) {
-            std::unique_lock<std::mutex> lock(stop_mutex_);
-            stop_cv_.wait(lock, [this] { return !running_.load(); });
-            break;
-        }
-    }
-}
-
-std::string LocalPipeTransport::read_message(std::shared_ptr<LocalPipeConnection> conn) {
-    // Line-based framing with poll-based async recv
-    while (running_ && conn->active.load()) {
-        size_t newline_pos = conn->read_buffer.find('\n');
-        if (newline_pos != std::string::npos) {
-            std::string message = conn->read_buffer.substr(0, newline_pos);
-            conn->read_buffer.erase(0, newline_pos + 1);
-            return message;
-        }
-
-        // Poll the client fd for incoming data
-        struct pollfd pfd;
-        pfd.fd = conn->handle;
-        pfd.events = POLLIN;
-
-        int poll_result = poll(&pfd, 1, config_.poll_interval_ms);
-        if (poll_result < 0) {
-            if (errno != EINTR) {
-                if (error_handler_) {
-                    error_handler_("poll() on client fd failed: " + std::string(strerror(errno)));
-                }
-            }
-            continue;
-        }
-        if (poll_result == 0) continue;
-
-        std::vector<char> buf(config_.buffer_size);
-        ssize_t bytes = recv(conn->handle, buf.data(), buf.size(), 0);
-        if (bytes <= 0) return "";
-
-        conn->read_buffer.append(buf.data(), static_cast<size_t>(bytes));
-    }
-    return "";
-}
-
-void LocalPipeTransport::client_read_loop(std::shared_ptr<LocalPipeConnection> conn) {
-    while (running_ && conn->active.load()) {
-        std::string message = read_message(conn);
-
-        if (message.empty()) {
-            conn->active = false;
-            break;
-        }
-
-        try {
-            auto json_msg = nlohmann::json::parse(message);
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = conn;
-            }
-            if (message_handler_) {
-                message_handler_(json_msg);
-            }
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = nullptr;
-            }
-        } catch (const nlohmann::json::parse_error& e) {
-            auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = conn;
-            }
-            conn->write_message(error_resp.dump());
-            {
-                std::lock_guard<std::mutex> rlock(responding_mutex_);
-                responding_connection_ = nullptr;
-            }
-            if (error_handler_) {
-                error_handler_("JSON parse error: " + std::string(e.what()));
-            }
-        } catch (const std::exception& e) {
-            if (error_handler_) {
-                error_handler_("Error processing message: " + std::string(e.what()));
-            }
-        }
-    }
-
-    std::cerr << "[cppmcp] Client #" << conn->connection_id << " disconnected" << std::endl;
-
-    if (conn->handle != LocalPipeConnection::INVALID_HANDLE) {
-        close(conn->handle);
-        conn->handle = LocalPipeConnection::INVALID_HANDLE;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        active_connections_.erase(
-            std::remove(active_connections_.begin(), active_connections_.end(), conn),
-            active_connections_.end());
-    }
 }
 
 void LocalPipeTransport::stop() {
     if (!running_.load()) return;
     running_ = false;
 
-    stop_cv_.notify_all();
-
-    std::vector<std::shared_ptr<LocalPipeConnection>> connections_copy;
     {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        connections_copy = active_connections_;
-    }
-
-    for (auto& conn : connections_copy) {
-        conn->active = false;
-        if (conn->handle != LocalPipeConnection::INVALID_HANDLE) {
-            close(conn->handle);
-            conn->handle = LocalPipeConnection::INVALID_HANDLE;
+        std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+        for (auto& conn : active_connections_) {
+            conn->active = false;
+            asio::error_code ec;
+            conn->socket.close(ec);
         }
-    }
-
-    for (auto& conn : connections_copy) {
-        if (conn->reader_thread.joinable()) {
-            conn->reader_thread.join();
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
         active_connections_.clear();
     }
 
-    if (listen_fd_ >= 0) {
-        close(listen_fd_);
-        listen_fd_ = -1;
+    if (acceptor_) {
+        asio::error_code ec;
+        acceptor_->close(ec);
     }
 
     unlink(resolve_pipe_path().c_str());
-
-    if (accept_thread_.joinable()) {
-        accept_thread_.join();
-    }
 }
 
+#endif
+
 bool LocalPipeTransport::is_running() const {
-    return running_.load();
+    return running_;
 }
 
 void LocalPipeTransport::send_message(const nlohmann::json& message) {
     std::string data = message.dump();
 
-    {
-        std::lock_guard<std::mutex> rlock(responding_mutex_);
-        if (responding_connection_ && responding_connection_->active.load()) {
-            responding_connection_->write_message(data);
-            return;
-        }
+    if (tl_responding_conn && tl_responding_conn->active.load()) {
+        tl_responding_conn->enqueue_write(data);
+        return;
     }
 
-    std::lock_guard<std::mutex> lock(connections_mutex_);
+    std::shared_lock<std::shared_mutex> lock(connections_mutex_);
     for (auto& conn : active_connections_) {
         if (conn->active.load()) {
-            conn->write_message(data);
+            conn->enqueue_write(data);
         }
     }
 }
@@ -769,6 +422,8 @@ void LocalPipeTransport::set_error_handler(ErrorCallback handler) {
     error_handler_ = std::move(handler);
 }
 
-} // namespace cppmcp
+void LocalPipeTransport::set_response_sender(ResponseSender sender) {
+    // No-op: tl_responding_conn handles response routing
+}
 
-#endif
+} // namespace cppmcp

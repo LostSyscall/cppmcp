@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 
+#include <asio.hpp>
 #include <nlohmann/json.hpp>
 
 namespace cppmcp {
@@ -23,12 +24,10 @@ public:
     using ErrorCallback = std::function<void(const std::string& error)>;
     virtual void set_error_handler(ErrorCallback handler) = 0;
 
-    // Optional: allows transports to intercept response routing.
-    // When set, the server calls this instead of send_message for the direct response
-    // to a request. This enables HTTP transports to return the response in the HTTP body
-    // rather than pushing it through SSE.
     using ResponseSender = std::function<void(const nlohmann::json& response)>;
     virtual void set_response_sender(ResponseSender sender) {}
+
+    virtual void set_io_context(asio::io_context* io_ctx) {}
 };
 
 } // namespace cppmcp

@@ -31,6 +31,7 @@ public:
     void set_response_sender(ResponseSender sender) override {
         response_sender_ = std::move(sender);
     }
+    void set_io_context(asio::io_context*) override {}
 
     std::string get_output() { return output_.str(); }
 

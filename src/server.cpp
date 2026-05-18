@@ -6,14 +6,16 @@
 namespace cppmcp {
 
 McpServer::McpServer(const Implementation& info, const ServerCapabilities& capabilities)
-    : server_info_(info), capabilities_(capabilities) {}
+    : server_info_(info), capabilities_(capabilities),
+      work_guard_(io_ctx_.get_executor()),
+      signals_(io_ctx_, SIGINT, SIGTERM) {}
 
 void McpServer::register_tool(const std::string& name, const Tool& tool_def, ToolHandler handler) {
     if (running_.load()) {
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     if (tool_handlers_.count(name)) {
         std::cerr << "[cppmcp] Tool '" << name << "' already registered, overwriting" << std::endl;
     }
@@ -25,7 +27,7 @@ void McpServer::register_tool_list(ToolListHandler handler) {
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     tool_list_handler_ = std::move(handler);
 }
 
@@ -34,7 +36,7 @@ void McpServer::register_resource(const std::string& uri, const Resource& resour
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     resource_handlers_[uri] = {resource_def, handler};
 }
 
@@ -43,7 +45,7 @@ void McpServer::register_resource_list(ResourceListHandler handler) {
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     resource_list_handler_ = std::move(handler);
 }
 
@@ -52,7 +54,7 @@ void McpServer::register_resource_template_list(ResourceTemplateListHandler hand
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     resource_template_list_handler_ = std::move(handler);
 }
 
@@ -61,7 +63,7 @@ void McpServer::register_prompt(const std::string& name, const Prompt& prompt_de
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     prompt_handlers_[name] = {prompt_def, handler};
 }
 
@@ -70,7 +72,7 @@ void McpServer::register_prompt_list(PromptListHandler handler) {
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     prompt_list_handler_ = std::move(handler);
 }
 
@@ -79,7 +81,7 @@ void McpServer::register_completion(CompletionHandler handler) {
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     completion_handler_ = std::move(handler);
 }
 
@@ -88,7 +90,7 @@ void McpServer::register_initialize_handler(InitializeHandler handler) {
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     initialize_handler_ = std::move(handler);
 }
 
@@ -97,13 +99,14 @@ void McpServer::register_logging_level_handler(LoggingLevelHandler handler) {
         std::cerr << "[cppmcp] Cannot register handlers after server is running" << std::endl;
         return;
     }
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
     logging_level_handler_ = std::move(handler);
 }
 
 void McpServer::connect(std::shared_ptr<ITransport> transport) {
-    std::lock_guard<std::mutex> lock(handlers_mutex_);
-    transport_ = transport;
+    std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
+    transport_ = std::move(transport);
+    transport_->set_io_context(&io_ctx_);
     transport_->set_message_handler([this](const nlohmann::json& msg) {
         on_message(msg);
     });
@@ -117,23 +120,40 @@ void McpServer::run() {
         std::cerr << "[cppmcp] No transport connected" << std::endl;
         return;
     }
-    running_ = true;
-    transport_->start();
-    // Block until stop() is called or transport stops naturally (e.g., stdin EOF)
-    std::unique_lock<std::mutex> lock(stop_mutex_);
-    while (running_.load()) {
-        stop_cv_.wait_for(lock, std::chrono::milliseconds(STOP_CHECK_INTERVAL_MS));
-        if (!running_.load()) break;
-        if (transport_ && !transport_->is_running()) {
-            running_ = false;
-            break;
-        }
+
+    // Freeze handler registries
+    {
+        std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
+        frozen_tool_handlers_ = tool_handlers_;
+        frozen_tool_list_handler_ = tool_list_handler_;
+        frozen_resource_handlers_ = resource_handlers_;
+        frozen_resource_list_handler_ = resource_list_handler_;
+        frozen_resource_template_list_handler_ = resource_template_list_handler_;
+        frozen_prompt_handlers_ = prompt_handlers_;
+        frozen_prompt_list_handler_ = prompt_list_handler_;
+        frozen_completion_handler_ = completion_handler_;
+        frozen_initialize_handler_ = initialize_handler_;
+        frozen_logging_level_handler_ = logging_level_handler_;
     }
+    frozen_.store(true, std::memory_order_release);
+
+    running_ = true;
+
+    signals_.async_wait([this](const asio::error_code&, int) {
+        stop();
+    });
+
+    transport_->start();
+
+    io_ctx_.run();
 }
 
 void McpServer::stop() {
+    frozen_.store(false, std::memory_order_release);
     running_ = false;
-    stop_cv_.notify_all();
+    work_guard_.reset();
+    io_ctx_.stop();
+    signals_.cancel();
     if (transport_) {
         transport_->stop();
     }
@@ -150,14 +170,8 @@ void McpServer::on_message(const nlohmann::json& message) {
     } else if (auto* notif = std::get_if<JsonRpcNotification>(&parsed)) {
         process_notification(*notif);
     } else if (auto* err_resp = std::get_if<JsonRpcErrorResponse>(&parsed)) {
-        nlohmann::json j;
-        j["jsonrpc"] = "2.0";
-        j["id"] = request_id_to_json(err_resp->id);
-        nlohmann::json error_obj;
-        error_obj["code"] = err_resp->error.code;
-        error_obj["message"] = err_resp->error.message;
-        if (err_resp->error.data) error_obj["data"] = *err_resp->error.data;
-        j["error"] = error_obj;
+        auto j = make_error_response(err_resp->id, err_resp->error.code,
+                                     err_resp->error.message, err_resp->error.data);
         if (transport_) {
             transport_->send_message(j);
         }
@@ -187,8 +201,11 @@ void McpServer::process_notification(const JsonRpcNotification& notif) {
 
 nlohmann::json McpServer::dispatch_method(const std::string& method, const RequestId& id,
                                            const std::optional<nlohmann::json>& params) {
+    static const nlohmann::json empty_params = nlohmann::json::object();
+    const nlohmann::json& p = params.value_or(empty_params);
+
     if (method == Protocol::METHOD_INITIALIZE) {
-        return handle_initialize(id, params.value_or(nlohmann::json::object()));
+        return handle_initialize(id, p);
     }
     if (method == Protocol::METHOD_PING) {
         return handle_ping(id);
@@ -201,16 +218,16 @@ nlohmann::json McpServer::dispatch_method(const std::string& method, const Reque
     }
 
     if (method == Protocol::METHOD_TOOLS_LIST) return handle_tools_list(id);
-    if (method == Protocol::METHOD_TOOLS_CALL) return handle_tools_call(id, params.value_or(nlohmann::json::object()));
+    if (method == Protocol::METHOD_TOOLS_CALL) return handle_tools_call(id, p);
     if (method == Protocol::METHOD_RESOURCES_LIST) return handle_resources_list(id);
-    if (method == Protocol::METHOD_RESOURCES_READ) return handle_resources_read(id, params.value_or(nlohmann::json::object()));
-    if (method == Protocol::METHOD_RESOURCES_SUBSCRIBE) return handle_resources_subscribe(id, params.value_or(nlohmann::json::object()));
-    if (method == Protocol::METHOD_RESOURCES_UNSUBSCRIBE) return handle_resources_unsubscribe(id, params.value_or(nlohmann::json::object()));
+    if (method == Protocol::METHOD_RESOURCES_READ) return handle_resources_read(id, p);
+    if (method == Protocol::METHOD_RESOURCES_SUBSCRIBE) return handle_resources_subscribe(id, p);
+    if (method == Protocol::METHOD_RESOURCES_UNSUBSCRIBE) return handle_resources_unsubscribe(id, p);
     if (method == Protocol::METHOD_RESOURCES_TEMPLATE_LIST) return handle_resources_templates_list(id);
     if (method == Protocol::METHOD_PROMPTS_LIST) return handle_prompts_list(id);
-    if (method == Protocol::METHOD_PROMPTS_GET) return handle_prompts_get(id, params.value_or(nlohmann::json::object()));
-    if (method == Protocol::METHOD_COMPLETION_COMPLETE) return handle_completion_complete(id, params.value_or(nlohmann::json::object()));
-    if (method == Protocol::METHOD_LOGGING_SET_LEVEL) return handle_logging_set_level(id, params.value_or(nlohmann::json::object()));
+    if (method == Protocol::METHOD_PROMPTS_GET) return handle_prompts_get(id, p);
+    if (method == Protocol::METHOD_COMPLETION_COMPLETE) return handle_completion_complete(id, p);
+    if (method == Protocol::METHOD_LOGGING_SET_LEVEL) return handle_logging_set_level(id, p);
 
     return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Method not found: " + method);
 }
@@ -219,8 +236,13 @@ nlohmann::json McpServer::handle_initialize(const RequestId& id, const nlohmann:
     InitializeHandler init_handler;
     ServerCapabilities caps;
     Implementation info;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        init_handler = frozen_initialize_handler_;
+        caps = capabilities_;
+        info = server_info_;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         init_handler = initialize_handler_;
         caps = capabilities_;
         info = server_info_;
@@ -244,27 +266,37 @@ nlohmann::json McpServer::handle_ping(const RequestId& id) {
 
 nlohmann::json McpServer::handle_tools_list(const RequestId& id) {
     ToolListHandler list_handler;
-    std::map<std::string, std::pair<Tool, ToolHandler>> handlers_copy;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
-        list_handler = tool_list_handler_;
-        handlers_copy = tool_handlers_;
-    }
-
     std::vector<Tool> tools;
-    if (list_handler) {
-        tools = list_handler();
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        list_handler = frozen_tool_list_handler_;
+        if (list_handler) {
+            tools = list_handler();
+        } else {
+            for (const auto& [name, pair] : frozen_tool_handlers_) {
+                tools.push_back(pair.first);
+            }
+        }
     } else {
-        for (const auto& [name, pair] : handlers_copy) {
-            tools.push_back(pair.first);
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
+        list_handler = tool_list_handler_;
+        if (list_handler) {
+            lock.unlock();
+            tools = list_handler();
+        } else {
+            for (const auto& [name, pair] : tool_handlers_) {
+                tools.push_back(pair.first);
+            }
         }
     }
 
-    nlohmann::json result;
-    result["tools"] = nlohmann::json::array();
+    std::vector<nlohmann::json> tools_json;
+    tools_json.reserve(tools.size());
     for (const auto& t : tools) {
-        result["tools"].push_back(nlohmann::json(t));
+        tools_json.emplace_back(nlohmann::json(t));
     }
+    nlohmann::json result;
+    result["tools"] = std::move(tools_json);
     return make_success_response(id, result);
 }
 
@@ -273,10 +305,17 @@ nlohmann::json McpServer::handle_tools_call(const RequestId& id, const nlohmann:
         return make_error_response(id, Protocol::INVALID_PARAMS, "Missing 'name' parameter");
     }
 
-    std::string tool_name = params["name"].get<std::string>();
+    const std::string& tool_name = params["name"].get_ref<const std::string&>();
     ToolHandler handler;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        auto it = frozen_tool_handlers_.find(tool_name);
+        if (it == frozen_tool_handlers_.end()) {
+            return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Tool not found: " + tool_name);
+        }
+        handler = it->second.second;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         auto it = tool_handlers_.find(tool_name);
         if (it == tool_handlers_.end()) {
             return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Tool not found: " + tool_name);
@@ -284,7 +323,8 @@ nlohmann::json McpServer::handle_tools_call(const RequestId& id, const nlohmann:
         handler = it->second.second;
     }
 
-    nlohmann::json arguments = params.contains("arguments") ? params["arguments"] : nlohmann::json::object();
+    static const nlohmann::json empty_args = nlohmann::json::object();
+    const nlohmann::json& arguments = params.contains("arguments") ? params["arguments"] : empty_args;
     RequestContext ctx(*this, id, transport_);
 
     auto result = handler(arguments, ctx);
@@ -294,8 +334,16 @@ nlohmann::json McpServer::handle_tools_call(const RequestId& id, const nlohmann:
 nlohmann::json McpServer::handle_resources_list(const RequestId& id) {
     ResourceListHandler list_handler;
     std::vector<Resource> resources;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        list_handler = frozen_resource_list_handler_;
+        if (!list_handler) {
+            for (const auto& [uri, pair] : frozen_resource_handlers_) {
+                resources.push_back(pair.first);
+            }
+        }
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         list_handler = resource_list_handler_;
         if (!list_handler) {
             for (const auto& [uri, pair] : resource_handlers_) {
@@ -308,11 +356,13 @@ nlohmann::json McpServer::handle_resources_list(const RequestId& id) {
         resources = list_handler();
     }
 
-    nlohmann::json result;
-    result["resources"] = nlohmann::json::array();
+    std::vector<nlohmann::json> resources_json;
+    resources_json.reserve(resources.size());
     for (const auto& r : resources) {
-        result["resources"].push_back(nlohmann::json(r));
+        resources_json.emplace_back(nlohmann::json(r));
     }
+    nlohmann::json result;
+    result["resources"] = std::move(resources_json);
     return make_success_response(id, result);
 }
 
@@ -321,10 +371,17 @@ nlohmann::json McpServer::handle_resources_read(const RequestId& id, const nlohm
         return make_error_response(id, Protocol::INVALID_PARAMS, "Missing 'uri' parameter");
     }
 
-    std::string uri = params["uri"].get<std::string>();
+    const std::string& uri = params["uri"].get_ref<const std::string&>();
     ResourceHandler handler;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        auto it = frozen_resource_handlers_.find(uri);
+        if (it == frozen_resource_handlers_.end()) {
+            return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Resource not found: " + uri);
+        }
+        handler = it->second.second;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         auto it = resource_handlers_.find(uri);
         if (it == resource_handlers_.end()) {
             return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Resource not found: " + uri);
@@ -341,9 +398,9 @@ nlohmann::json McpServer::handle_resources_subscribe(const RequestId& id, const 
     if (!params.contains("uri")) {
         return make_error_response(id, Protocol::INVALID_PARAMS, "Missing 'uri' parameter");
     }
-    std::string uri = params["uri"].get<std::string>();
+    const std::string& uri = params["uri"].get_ref<const std::string&>();
     {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+        std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
         subscribed_resources_.insert(uri);
     }
     return make_success_response(id, nlohmann::json(EmptyResult{}));
@@ -353,9 +410,9 @@ nlohmann::json McpServer::handle_resources_unsubscribe(const RequestId& id, cons
     if (!params.contains("uri")) {
         return make_error_response(id, Protocol::INVALID_PARAMS, "Missing 'uri' parameter");
     }
-    std::string uri = params["uri"].get<std::string>();
+    const std::string& uri = params["uri"].get_ref<const std::string&>();
     {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+        std::unique_lock<std::shared_mutex> lock(handlers_mutex_);
         subscribed_resources_.erase(uri);
     }
     return make_success_response(id, nlohmann::json(EmptyResult{}));
@@ -363,8 +420,11 @@ nlohmann::json McpServer::handle_resources_unsubscribe(const RequestId& id, cons
 
 nlohmann::json McpServer::handle_resources_templates_list(const RequestId& id) {
     ResourceTemplateListHandler list_handler;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        list_handler = frozen_resource_template_list_handler_;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         list_handler = resource_template_list_handler_;
     }
 
@@ -373,19 +433,29 @@ nlohmann::json McpServer::handle_resources_templates_list(const RequestId& id) {
         templates = list_handler();
     }
 
-    nlohmann::json result;
-    result["resourceTemplates"] = nlohmann::json::array();
+    std::vector<nlohmann::json> templates_json;
+    templates_json.reserve(templates.size());
     for (const auto& t : templates) {
-        result["resourceTemplates"].push_back(nlohmann::json(t));
+        templates_json.emplace_back(nlohmann::json(t));
     }
+    nlohmann::json result;
+    result["resourceTemplates"] = std::move(templates_json);
     return make_success_response(id, result);
 }
 
 nlohmann::json McpServer::handle_prompts_list(const RequestId& id) {
     PromptListHandler list_handler;
     std::vector<Prompt> prompts;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        list_handler = frozen_prompt_list_handler_;
+        if (!list_handler) {
+            for (const auto& [name, pair] : frozen_prompt_handlers_) {
+                prompts.push_back(pair.first);
+            }
+        }
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         list_handler = prompt_list_handler_;
         if (!list_handler) {
             for (const auto& [name, pair] : prompt_handlers_) {
@@ -398,11 +468,13 @@ nlohmann::json McpServer::handle_prompts_list(const RequestId& id) {
         prompts = list_handler();
     }
 
-    nlohmann::json result;
-    result["prompts"] = nlohmann::json::array();
+    std::vector<nlohmann::json> prompts_json;
+    prompts_json.reserve(prompts.size());
     for (const auto& p : prompts) {
-        result["prompts"].push_back(nlohmann::json(p));
+        prompts_json.emplace_back(nlohmann::json(p));
     }
+    nlohmann::json result;
+    result["prompts"] = std::move(prompts_json);
     return make_success_response(id, result);
 }
 
@@ -411,10 +483,17 @@ nlohmann::json McpServer::handle_prompts_get(const RequestId& id, const nlohmann
         return make_error_response(id, Protocol::INVALID_PARAMS, "Missing 'name' parameter");
     }
 
-    std::string prompt_name = params["name"].get<std::string>();
+    const std::string& prompt_name = params["name"].get_ref<const std::string&>();
     PromptHandler handler;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        auto it = frozen_prompt_handlers_.find(prompt_name);
+        if (it == frozen_prompt_handlers_.end()) {
+            return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Prompt not found: " + prompt_name);
+        }
+        handler = it->second.second;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         auto it = prompt_handlers_.find(prompt_name);
         if (it == prompt_handlers_.end()) {
             return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Prompt not found: " + prompt_name);
@@ -422,7 +501,8 @@ nlohmann::json McpServer::handle_prompts_get(const RequestId& id, const nlohmann
         handler = it->second.second;
     }
 
-    nlohmann::json arguments = params.contains("arguments") ? params["arguments"] : nlohmann::json::object();
+    static const nlohmann::json empty_args = nlohmann::json::object();
+    const nlohmann::json& arguments = params.contains("arguments") ? params["arguments"] : empty_args;
     RequestContext ctx(*this, id, transport_);
 
     auto result = handler(prompt_name, arguments, ctx);
@@ -431,8 +511,14 @@ nlohmann::json McpServer::handle_prompts_get(const RequestId& id, const nlohmann
 
 nlohmann::json McpServer::handle_completion_complete(const RequestId& id, const nlohmann::json& params) {
     CompletionHandler handler;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        if (!frozen_completion_handler_) {
+            return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Completions not supported");
+        }
+        handler = frozen_completion_handler_;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         if (!completion_handler_) {
             return make_error_response(id, Protocol::METHOD_NOT_FOUND, "Completions not supported");
         }
@@ -461,8 +547,11 @@ nlohmann::json McpServer::handle_logging_set_level(const RequestId& id, const nl
 
     std::string level = params["level"].get<std::string>();
     LoggingLevelHandler handler;
-    {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
+
+    if (frozen_.load(std::memory_order_acquire)) {
+        handler = frozen_logging_level_handler_;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(handlers_mutex_);
         handler = logging_level_handler_;
     }
 
@@ -473,12 +562,13 @@ nlohmann::json McpServer::handle_logging_set_level(const RequestId& id, const nl
 }
 
 // --- Notification sending ---
-void McpServer::send_notification(const std::string& method, const nlohmann::json& params) {
+void McpServer::send_notification(const std::string& method, nlohmann::json params) {
     if (!transport_ || !running_) return;
-    nlohmann::json notif;
-    notif["jsonrpc"] = "2.0";
-    notif["method"] = method;
-    if (!params.is_null()) notif["params"] = params;
+    nlohmann::json notif = nlohmann::json{
+        {"jsonrpc", "2.0"},
+        {"method", method}
+    };
+    if (!params.is_null()) notif["params"] = std::move(params);
     try {
         transport_->send_message(notif);
     } catch (const std::exception&) {
@@ -504,20 +594,19 @@ void McpServer::notify_prompts_list_changed() {
 
 void McpServer::notify_progress(const RequestId& progress_token, double progress,
                                  std::optional<double> total) {
-    nlohmann::json params;
-    params["progressToken"] = request_id_to_json(progress_token);
-    params["progress"] = progress;
+    nlohmann::json params = nlohmann::json{
+        {"progressToken", request_id_to_json(progress_token)},
+        {"progress", progress}
+    };
     if (total) params["total"] = *total;
-    send_notification(Protocol::NOTIF_PROGRESS, params);
+    send_notification(Protocol::NOTIF_PROGRESS, std::move(params));
 }
 
 void McpServer::notify_logging(const std::string& level, const std::string& data,
                                 std::optional<std::string> logger) {
-    nlohmann::json params;
-    params["level"] = level;
-    params["data"] = data;
+    nlohmann::json params = nlohmann::json{{"level", level}, {"data", data}};
     if (logger) params["logger"] = *logger;
-    send_notification(Protocol::NOTIF_MESSAGE, params);
+    send_notification(Protocol::NOTIF_MESSAGE, std::move(params));
 }
 
 } // namespace cppmcp

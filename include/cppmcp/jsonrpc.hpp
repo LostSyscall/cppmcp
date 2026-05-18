@@ -51,7 +51,7 @@ using ParsedMessage = std::variant<JsonRpcRequest, JsonRpcNotification, JsonRpcE
 ParsedMessage parse_message(const nlohmann::json& raw);
 
 // Construct success response
-nlohmann::json make_success_response(const RequestId& id, const nlohmann::json& result);
+nlohmann::json make_success_response(const RequestId& id, nlohmann::json result);
 
 // Construct error response
 nlohmann::json make_error_response(const RequestId& id, int code,

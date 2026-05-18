@@ -1,36 +1,37 @@
-# cppmcp — C++ MCP 服务器库
+# cppmcp — C++ MCP Server Library
+**[中文](docs/zh-CN/README.md)**
 
-C++ 实现的 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/) 服务器库，符合 MCP 协议规范 `2025-03-26` 版本。支持四种传输模式：标准输入输出（stdio）、SSE、Streamable HTTP、本地管道（Windows Named Pipe / Unix Domain Socket），使用 JSON-RPC 2.0 进行协议通信。
+A C++ implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server, conforming to MCP specification version `2025-03-26`. Supports four transport modes: stdio, SSE, Streamable HTTP, and local pipe (Windows Named Pipe / Unix Domain Socket), using JSON-RPC 2.0 for protocol communication.
 
-## 特性
 
-- **四种传输模式**：stdio、SSE（传统 HTTP）、Streamable HTTP、本地管道
-- **完整 MCP 协议**：Tools、Resources、Prompts、Completions、Logging
-- **进度上报**：Tool 调用支持实时进度通知
-- **跨平台**：Windows（MSVC 2019+）与 Linux（GCC 11+）
-- **C++17**：无依赖高级特性，兼容 VS2019
-- **轻量依赖**：仅 nlohmann-json 和 cpp-httplib
+## Features
 
-## 快速开始
+- **Four transport modes**: stdio, SSE (legacy HTTP), Streamable HTTP, local pipe
+- **Fully async I/O**: asio unified event loop + llhttp HTTP parser, zero thread kidnapping, zero polling
+- **Full MCP protocol**: Tools, Resources, Prompts, Completions, Logging
+- **Progress reporting**: real-time progress notifications during tool calls
+- **Cross-platform**: Windows (MSVC 2019+) and Linux (GCC 11+)
+- **C++17**: no advanced feature dependencies, VS2019 compatible
+- **Lightweight deps**: only nlohmann-json, asio, llhttp
+- **Full test coverage**: 36 unit tests + 18 real I/O integration tests, verified on Windows & Linux
 
-### 环境要求
+## Quick Start
+
+### Prerequisites
 
 - CMake 3.15+
-- C++17 编译器（MSVC 2019、GCC 11、Clang 14）
-- [vcpkg](https://github.com/microsoft/vcpkg) 包管理器
+- C++17 compiler (MSVC 2019, GCC 11, Clang 14)
+- [vcpkg](https://github.com/microsoft/vcpkg) package manager
 
-### 安装依赖
+### Install Dependencies
 
 ```bash
-# 克隆项目
 git clone https://github.com/your-org/cppmcp.git
 cd cppmcp
-
-# vcpkg 安装依赖（需要设置 VCPKG_ROOT）
 vcpkg install
 ```
 
-### 构建
+### Build
 
 ```bash
 cmake -B build \
@@ -41,52 +42,62 @@ cmake -B build \
 cmake --build build
 ```
 
-### 运行测试
+### Run Tests
 
 ```bash
+# Unit tests only (fast)
+cd build && ctest -E integration --output-on-failure
+
+# Integration tests (real I/O, slower)
+cmake -B build -DCPPMCP_BUILD_INTEGRATION_TESTS=ON ...
+cd build && ctest -L integration --output-on-failure
+
+# All tests
 cd build && ctest --output-on-failure
 ```
 
-### Docker 构建（Linux 验证）
+### Docker (Linux verification)
 
 ```bash
-docker compose up build    # 构建并运行测试
-docker compose run dev bash # 开发环境交互式 shell
+docker compose up build    # Build and run tests
+docker compose run dev bash # Interactive dev shell
 ```
 
-## 项目结构
+## Project Structure
 
 ```
 cppmcp/
-├── include/cppmcp/          # 公共头文件
-│   ├── server.hpp           # McpServer 核心类
-│   ├── transport.hpp        # ITransport 抽象接口
-│   ├── types.hpp            # MCP 类型定义（Tool, Resource, Prompt 等）
-│   ├── jsonrpc.hpp          # JSON-RPC 2.0 消息解析
-│   ├── protocol.hpp         # 协议常量与方法名
-│   ├── context.hpp          # RequestContext（进度上报、日志）
-│   ├── exception.hpp        # 异常类型
-│   ├── common.hpp           # RequestId 变体与通用工具
-│   ├── error_codes.hpp      # JSON-RPC 错误码常量
+├── include/cppmcp/          # Public headers
+│   ├── server.hpp           # McpServer core class
+│   ├── transport.hpp        # ITransport abstract interface
+│   ├── types.hpp            # MCP types (Tool, Resource, Prompt, etc.)
+│   ├── jsonrpc.hpp          # JSON-RPC 2.0 message parsing
+│   ├── protocol.hpp         # Protocol constants & method names
+│   ├── context.hpp          # RequestContext (progress, logging)
+│   ├── exception.hpp        # Exception types
+│   ├── common.hpp           # RequestId variant & utilities
 │   ├── stdio_transport.hpp  # StdioTransport
-│   ├── http_transport.hpp   # HttpTransport（SSE + Streamable HTTP）
+│   ├── http_transport.hpp   # HttpTransport (SSE + Streamable HTTP)
 │   └── local_pipe_transport.hpp # LocalPipeTransport
-├── src/                     # 实现文件
-├── examples/                # 示例服务器
-│   ├── simple_stdio_server/   # stdio 模式示例
-│   ├── streamable_http_server/ # Streamable HTTP 模式示例
-│   ├── http_sse_server/       # SSE 模式示例
-│   └── local_pipe_server/     # 本地管道模式示例
-├── tests/                   # 单元与集成测试（36 个测试）
-├── Dockerfile               # Docker 多阶段构建
-├── docker-compose.yml       # Docker Compose 配置
-├── vcpkg.json               # vcpkg 依赖清单
-└── CMakeLists.txt           # 顶层 CMake 配置
+├── src/                     # Implementation files
+├── examples/                # Example servers
+│   ├── simple_stdio_server/
+│   ├── streamable_http_server/
+│   ├── http_sse_server/
+│   └── local_pipe_server/
+├── tests/                   # Unit & integration tests
+│   ├── test_*.cpp           # 36 unit tests (TestTransport mock)
+│   └── integration/         # 18 real I/O integration tests
+├── docs/zh-CN/              # Chinese documentation
+├── Dockerfile               # Docker multi-stage build
+├── docker-compose.yml
+├── vcpkg.json
+└── CMakeLists.txt
 ```
 
-## 使用示例
+## Usage Examples
 
-### 最小 stdio 服务器
+### Minimal stdio server
 
 ```cpp
 #include <cppmcp/server.hpp>
@@ -102,15 +113,12 @@ int main() {
 
     McpServer server(info, caps);
 
-    // 注册工具
     Tool echo_tool;
     echo_tool.name = "echo";
-    echo_tool.description = "回显输入消息";
+    echo_tool.description = "Echoes the input message";
     echo_tool.input_schema = R"({
         "type": "object",
-        "properties": {
-            "message": {"type": "string"}
-        },
+        "properties": {"message": {"type": "string"}},
         "required": ["message"]
     })"_json;
 
@@ -127,7 +135,7 @@ int main() {
 }
 ```
 
-### Streamable HTTP 服务器
+### Streamable HTTP server
 
 ```cpp
 #include <cppmcp/server.hpp>
@@ -144,7 +152,7 @@ server.connect(transport);
 server.run();
 ```
 
-### SSE（传统 HTTP）服务器
+### SSE (legacy HTTP) server
 
 ```cpp
 HttpTransportConfig config;
@@ -159,14 +167,14 @@ server.connect(transport);
 server.run();
 ```
 
-### 本地管道服务器
+### Local pipe server
 
 ```cpp
 #include <cppmcp/local_pipe_transport.hpp>
 
 LocalPipeConfig config;
 config.pipe_name = "my_mcp_pipe";
-config.mode = PipeMode::SingleClient;  // 或 PipeMode::MultiClient
+config.mode = PipeMode::SingleClient;  // or PipeMode::MultiClient
 
 auto transport = std::make_shared<LocalPipeTransport>(config);
 server.connect(transport);
@@ -175,28 +183,27 @@ server.run();
 // Linux:   /tmp/my_mcp_pipe.sock
 ```
 
-### 进度上报
+### Progress reporting
 
 ```cpp
 server.register_tool("long_task", tool_def,
     [](const nlohmann::json& args, RequestContext& ctx) -> CallToolResult {
         for (int i = 0; i < 10; ++i) {
-            ctx.report_progress(i / 10.0, 1.0);  // 进度，总计
-            // 执行工作...
+            ctx.report_progress(i / 10.0, 1.0);
         }
         CallToolResult result;
-        result.content.push_back(TextContent{"text", "完成"});
+        result.content.push_back(TextContent{"text", "Done"});
         return result;
     });
 ```
 
-### 资源注册
+### Resource registration
 
 ```cpp
 Resource doc;
 doc.name = "readme";
 doc.uri = "file:///readme.md";
-doc.description = "项目说明文档";
+doc.description = "Project documentation";
 
 server.register_resource("file:///readme.md", doc,
     [](const std::string& uri, RequestContext&) -> ReadResourceResult {
@@ -204,18 +211,18 @@ server.register_resource("file:///readme.md", doc,
         ResourceContents rc;
         rc.uri = uri;
         rc.mime_type = "text/plain";
-        rc.text = "文档内容...";
+        rc.text = "Documentation content...";
         result.contents.push_back(rc);
         return result;
     });
 ```
 
-### Prompt 注册
+### Prompt registration
 
 ```cpp
 Prompt greet;
 greet.name = "greet";
-greet.description = "生成问候语";
+greet.description = "Generate a greeting";
 PromptArgument name_arg;
 name_arg.name = "name";
 name_arg.required = true;
@@ -224,122 +231,131 @@ greet.arguments = {name_arg};
 server.register_prompt("greet", greet,
     [](const std::string&, const nlohmann::json& args, RequestContext&) -> GetPromptResult {
         GetPromptResult result;
-        result.description = "问候语";
+        result.description = "Greeting";
         result.messages.push_back(PromptMessage{
-            "user", TextContent{"text", "你好，" + args["name"].get<std::string>()}
+            "user", TextContent{"text", "Hello, " + args["name"].get<std::string>()}
         });
         return result;
     });
 ```
 
-## 核心类
+## Core Classes
 
 ### McpServer
 
-主服务器类，管理 MCP 协议生命周期与请求处理。
+Main server class, manages MCP protocol lifecycle and request processing.
 
-| 方法 | 说明 |
-|------|------|
-| `McpServer(info, caps)` | 构造，传入服务器信息与能力声明 |
-| `register_tool(name, def, handler)` | 注册工具 |
-| `register_resource(uri, def, handler)` | 注册资源 |
-| `register_prompt(name, def, handler)` | 注册 Prompt |
-| `register_completion(handler)` | 注册 Completion 处理器 |
-| `connect(transport)` | 连接传输层 |
-| `run()` | 运行服务器（阻塞） |
-| `stop()` | 停止服务器 |
-| `notify_tools_list_changed()` | 通知工具列表变更 |
-| `notify_resources_list_changed()` | 通知资源列表变更 |
-| `notify_resources_updated(uri)` | 通知资源内容更新 |
-| `notify_prompts_list_changed()` | 通知 Prompt 列表变更 |
+| Method | Description |
+|--------|-------------|
+| `McpServer(info, caps)` | Construct with server info & capability declaration |
+| `register_tool(name, def, handler)` | Register a tool |
+| `register_resource(uri, def, handler)` | Register a resource |
+| `register_prompt(name, def, handler)` | Register a prompt |
+| `register_completion(handler)` | Register completion handler |
+| `connect(transport)` | Connect a transport |
+| `run()` | Run server (blocking) |
+| `stop()` | Stop server |
+| `is_running()` | Check server running state |
+| `notify_tools_list_changed()` | Notify tool list changed |
+| `notify_resources_list_changed()` | Notify resource list changed |
+| `notify_resources_updated(uri)` | Notify resource content updated |
+| `notify_prompts_list_changed()` | Notify prompt list changed |
 
 ### ITransport
 
-传输层抽象接口，所有传输实现均继承此接口。
+Abstract transport interface. All transport implementations inherit from this.
 
-| 方法 | 说明 |
-|------|------|
-| `start()` | 启动传输层 |
-| `stop()` | 停止传输层 |
-| `is_running()` | 检查运行状态 |
-| `send_message(json)` | 发送消息 |
-| `set_message_handler(cb)` | 设置消息回调 |
-| `set_error_handler(cb)` | 设置错误回调 |
+| Method | Description |
+|--------|-------------|
+| `start()` | Start transport |
+| `stop()` | Stop transport |
+| `is_running()` | Check running state |
+| `send_message(json)` | Send message |
+| `set_message_handler(cb)` | Set message callback |
+| `set_error_handler(cb)` | Set error callback |
+| `set_io_context(io_ctx)` | Set asio io_context |
+| `set_response_sender(sender)` | Set response sender |
 
-### RequestContext
+### HttpTransport-specific
 
-请求上下文，在 Tool/Resource/Prompt 处理器中使用。
+| Method | Description |
+|--------|-------------|
+| `get_port()` | Get actual listening port (supports port=0 random assignment) |
 
-| 方法 | 说明 |
-|------|------|
-| `report_progress(progress, total)` | 上报进度通知 |
-| `notify_logging(level, data)` | 发送日志通知 |
+## Transport Modes
 
-## 传输模式
-
-| 模式 | 适用场景 | 连接方式 |
-|------|----------|----------|
-| **stdio** | 嵌入式进程、CLI 工具 | 标准输入/输出，行分隔 JSON-RPC |
-| **Streamable HTTP** | Web 服务、远程调用 | POST /mcp，GET SSE 流，DELETE 断开 |
-| **SSE** | 兼容旧版客户端 | GET /sse 接收事件，POST /messages 发送请求 |
-| **本地管道** | 本地高性能 IPC | Windows: Named Pipe，Linux: Unix Domain Socket |
+| Mode | Use case | Connection |
+|------|----------|------------|
+| **stdio** | Embedded processes, CLI tools | stdin/stdout, newline-delimited JSON-RPC |
+| **Streamable HTTP** | Web services, remote calls | POST /mcp, GET SSE stream, DELETE disconnect |
+| **SSE** | Legacy client compatibility | GET /sse for events, POST /messages for requests |
+| **Local pipe** | High-performance local IPC | Windows: Named Pipe, Linux: Unix Domain Socket |
 
 ### Streamable HTTP
 
-MCP 协议推荐的 HTTP 模式。单端点架构：
+MCP-recommended HTTP mode. Single-endpoint architecture:
 
-- `POST /mcp` — 发送请求，响应在 HTTP body 或 SSE 流中返回
-- `GET /mcp` — 建立 SSE 流，接收服务器推送通知
-- `DELETE /mcp` — 断开会话
-- 会话管理：通过 `mcp-session-id` 头部标识
+- `POST /mcp` — send request, response in HTTP body or SSE stream
+- `GET /mcp` — establish SSE stream for server-push notifications
+- `DELETE /mcp` — terminate session
+- Session management via `mcp-session-id` header
 
-### 本地管道
+### Local Pipe
 
-高性能本地进程间通信：
+High-performance local inter-process communication:
 
-- **SingleClient**：单连接模式，适用于一对一通信
-- **MultiClient**：多连接模式，支持最多 `max_instances` 个并发连接
-- Windows 使用 Overlapped I/O（`FILE_FLAG_OVERLAPPED`），Linux 使用 `poll` 非阻塞 I/O
+- **SingleClient**: single connection mode, one-to-one communication
+- **MultiClient**: multi-connection mode, up to `max_instances` concurrent connections
+- Windows uses Overlapped I/O (`FILE_FLAG_OVERLAPPED` + asio stream_handle), Linux uses asio local::stream_protocol
 
-## 测试
+## Testing
 
-项目包含 36 个 Google Test 测试，覆盖：
+The project contains 54 Google Test tests across two tiers:
 
-- JSON-RPC 2.0 解析与序列化（10 个）
-- MCP 类型序列化（9 个）
-- 服务器核心逻辑（8 个）
-- 集成测试：Resources、Prompts、通知（9 个）
+### Unit Tests (36)
 
-```bash
-cmake -B build -DCPPMCP_BUILD_TESTS=ON -DCMAKE_TOOLCHAIN_FILE=...
-cmake --build build
-cd build && ctest --output-on-failure
-```
+Using TestTransport mock (no real I/O):
 
-## CMake 选项
+- JSON-RPC 2.0 parsing & serialization (10)
+- MCP type serialization (9)
+- Server core logic (8)
+- Integration: Resources, Prompts, notifications (9)
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `CPPMCP_BUILD_EXAMPLES` | ON | 构建示例服务器 |
-| `CPPMCP_BUILD_TESTS` | OFF | 构建单元测试 |
+### Integration Tests (18)
 
-## 依赖
+Using real I/O transports, verified on Windows & Linux:
 
-| 库 | 用途 |
-|----|------|
-| [nlohmann-json](https://github.com/nlohmann/json) | JSON 序列化 |
-| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | HTTP 服务器 |
-| [gtest](https://github.com/google/googletest) | 单元测试（可选） |
+- LocalPipe real connections: ConnectAndInitialize, PingAfterInit, ToolsCall, MultipleSequentialRequests (4)
+- Streamable HTTP real requests: Initialize, Ping, ToolsCall, SessionId, Notification202, Delete (6)
+- SSE real streaming: ConnectGetEndpoint, InitializeViaPost, ToolsCallViaSse, ResourcesRead (4)
+- Stdio subprocess pipes: InitializeAndPing, ToolsCall, ToolsList, MalformedJson (4)
 
-## 代码风格
+## CMake Options
 
-- 命名空间：`cppmcp`
-- 类名：PascalCase（`McpServer`、`ITransport`）
-- 函数/方法：snake_case（`register_tool`、`send_message`）
-- 成员变量：snake_case + 后缀下划线（`running_`、`config_`）
-- 类型/结构体：PascalCase（`Tool`、`Resource`、`CallToolResult`）
-- 常量：UPPER_SNAKE_CASE（`LATEST_PROTOCOL_VERSION`）
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CPPMCP_BUILD_EXAMPLES` | ON | Build example servers |
+| `CPPMCP_BUILD_TESTS` | OFF | Build unit tests |
+| `CPPMCP_BUILD_INTEGRATION_TESTS` | OFF | Build integration tests (real I/O) |
 
-## 许可证
+## Dependencies
+
+| Library | Purpose |
+|---------|---------|
+| [nlohmann-json](https://github.com/nlohmann/json) | JSON serialization |
+| [asio](https://github.com/chriskohlhoff/asio) | Async I/O (standalone) |
+| [llhttp](https://github.com/nodejs/llhttp) | HTTP parsing |
+| [gtest](https://github.com/google/googletest) | Testing (optional) |
+
+## Code Style
+
+- Namespace: `cppmcp`
+- Classes: PascalCase (`McpServer`, `ITransport`)
+- Functions/methods: snake_case (`register_tool`, `send_message`)
+- Members: snake_case + trailing underscore (`running_`, `config_`)
+- Types/structs: PascalCase (`Tool`, `Resource`, `CallToolResult`)
+- Constants: UPPER_SNAKE_CASE (`LATEST_PROTOCOL_VERSION`)
+
+## License
 
 MIT License

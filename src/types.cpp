@@ -103,12 +103,13 @@ void from_json(const nlohmann::json& j, Tool& t) {
 }
 
 void to_json(nlohmann::json& j, const CallToolResult& r) {
-    j = nlohmann::json::object();
-    nlohmann::json content_arr = nlohmann::json::array();
+    std::vector<nlohmann::json> content_json;
+    content_json.reserve(r.content.size());
     for (const auto& c : r.content) {
-        content_arr.push_back(content_to_json(c));
+        content_json.emplace_back(content_to_json(c));
     }
-    j["content"] = content_arr;
+    j = nlohmann::json::object();
+    j["content"] = std::move(content_json);
     if (r.structured_content) j["structuredContent"] = *r.structured_content;
     j["isError"] = r.is_error;
 }

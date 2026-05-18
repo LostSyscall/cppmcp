@@ -54,6 +54,7 @@ RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCPPMCP_BUILD_TESTS=ON \
+    -DCPPMCP_BUILD_INTEGRATION_TESTS=ON \
     -DCPPMCP_BUILD_EXAMPLES=ON \
     && cmake --build build
 
@@ -73,8 +74,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++-11 \
     cmake \
     make \
+    pkg-config \
     git \
     ca-certificates \
+    zip \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CXX=g++-11

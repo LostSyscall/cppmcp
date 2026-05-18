@@ -14,9 +14,12 @@ target_include_directories(cppmcp_lib PUBLIC
 
 target_link_libraries(cppmcp_lib PUBLIC
     nlohmann_json::nlohmann_json
-    httplib::httplib
+    asio::asio
+    llhttp::llhttp_static
 )
 
+target_compile_definitions(cppmcp_lib PUBLIC ASIO_STANDALONE)
+
 if(WIN32)
-    target_compile_definitions(cppmcp_lib PUBLIC NOMINMAX)
+    target_compile_definitions(cppmcp_lib PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX)
 endif()

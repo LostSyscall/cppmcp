@@ -1,16 +1,17 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
+#include <asio.hpp>
 #include <nlohmann/json.hpp>
 
 #include "common.hpp"
@@ -20,8 +21,6 @@
 #include "types.hpp"
 
 namespace cppmcp {
-
-constexpr int STOP_CHECK_INTERVAL_MS = 200;
 
 // --- Handler types ---
 using ToolHandler = std::function<CallToolResult(const nlohmann::json& arguments, RequestContext& ctx)>;
@@ -67,9 +66,10 @@ public:
     // --- Server Lifecycle ---
     void run();
     void stop();
+    bool is_running() const { return running_.load(); }
 
     // --- Notification Sending ---
-    void send_notification(const std::string& method, const nlohmann::json& params = {});
+    void send_notification(const std::string& method, nlohmann::json params = {});
     void notify_tools_list_changed();
     void notify_resources_list_changed();
     void notify_resources_updated(const std::string& uri);
@@ -111,13 +111,16 @@ private:
     Implementation server_info_;
     ServerCapabilities capabilities_;
     std::shared_ptr<ITransport> transport_;
-    std::mutex handlers_mutex_;
+    std::shared_mutex handlers_mutex_;
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};
-    std::mutex stop_mutex_;
-    std::condition_variable stop_cv_;
+    std::atomic<bool> frozen_{false};
 
-    // Handler registries
+    asio::io_context io_ctx_;
+    asio::executor_work_guard<asio::io_context::executor_type> work_guard_;
+    asio::signal_set signals_;
+
+    // Handler registries (mutable pre-runtime, frozen at run() time)
     std::map<std::string, std::pair<Tool, ToolHandler>> tool_handlers_;
     ToolListHandler tool_list_handler_;
 
@@ -131,6 +134,18 @@ private:
     CompletionHandler completion_handler_;
     InitializeHandler initialize_handler_;
     LoggingLevelHandler logging_level_handler_;
+
+    // Frozen copies — immutable after run(), lock-free reads during runtime
+    std::map<std::string, std::pair<Tool, ToolHandler>> frozen_tool_handlers_;
+    ToolListHandler frozen_tool_list_handler_;
+    std::map<std::string, std::pair<Resource, ResourceHandler>> frozen_resource_handlers_;
+    ResourceListHandler frozen_resource_list_handler_;
+    ResourceTemplateListHandler frozen_resource_template_list_handler_;
+    std::map<std::string, std::pair<Prompt, PromptHandler>> frozen_prompt_handlers_;
+    PromptListHandler frozen_prompt_list_handler_;
+    CompletionHandler frozen_completion_handler_;
+    InitializeHandler frozen_initialize_handler_;
+    LoggingLevelHandler frozen_logging_level_handler_;
 
     // Subscribed resources tracking
     std::set<std::string> subscribed_resources_;

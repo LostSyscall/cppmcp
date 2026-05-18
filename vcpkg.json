@@ -1,7 +1,8 @@
 {
   "dependencies": [
     "nlohmann-json",
-    "cpp-httplib",
+    "asio",
+    "llhttp",
     "gtest"
   ]
 }

@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(httplib CONFIG REQUIRED)
+find_package(asio CONFIG REQUIRED)
+find_package(llhttp CONFIG REQUIRED)
 
 add_subdirectory(src)
 
@@ -20,4 +21,11 @@ if(CPPMCP_BUILD_TESTS)
     enable_testing()
     find_package(GTest CONFIG REQUIRED)
     add_subdirectory(tests)
+endif()
+
+option(CPPMCP_BUILD_INTEGRATION_TESTS "Build integration tests (requires real I/O)" OFF)
+if(CPPMCP_BUILD_INTEGRATION_TESTS)
+    enable_testing()
+    find_package(GTest CONFIG REQUIRED)
+    add_subdirectory(tests/integration)
 endif()

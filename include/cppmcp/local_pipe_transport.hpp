@@ -1,13 +1,16 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
+#include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <asio.hpp>
 #include <nlohmann/json.hpp>
 
 #include "transport.hpp"
@@ -15,44 +18,43 @@
 namespace cppmcp {
 
 enum class PipeMode {
-    SingleClient,   // 1 connection at a time
-    MultiClient     // N simultaneous connections
+    SingleClient,
+    MultiClient
 };
 
 struct LocalPipeConfig {
-    std::string pipe_name = "cppmcp";  // Windows: \\.\pipe\cppmcp, Unix: /tmp/cppmcp.sock
+    std::string pipe_name = "cppmcp";
     PipeMode mode = PipeMode::SingleClient;
-    int max_instances = 4;             // Max simultaneous connections (MultiClient)
-    int buffer_size = 65536;           // Read/write buffer size in bytes
-    int poll_interval_ms = 500;        // Wait interval for running_ checks (WaitForSingleObjectEx, poll, stop_cv)
+    int max_instances = 4;
+    size_t buffer_size = 65536;
 };
 
-// Per-connection state (platform-agnostic handle type)
-struct LocalPipeConnection {
+// Per-connection state for asio-based async I/O
+struct PipeConnection {
 #ifdef _WIN32
-    using HandleType = void*;  // HANDLE
-    static constexpr HandleType INVALID_HANDLE = nullptr;
+    asio::windows::stream_handle stream_handle;
 #else
-    using HandleType = int;
-    static constexpr HandleType INVALID_HANDLE = -1;
+    asio::local::stream_protocol::socket socket;
 #endif
-
-    HandleType handle = INVALID_HANDLE;
-    std::thread reader_thread;
+    asio::streambuf read_buf;
+    std::deque<std::string> write_queue;
     std::mutex write_mutex;
-    std::atomic<bool> active{false};
+    std::atomic<bool> active{true};
     int connection_id = 0;
 
+    ITransport::MessageCallback message_handler;
+    ITransport::ErrorCallback error_handler;
+
 #ifdef _WIN32
-    void* read_event = nullptr;   // Manual-reset event for overlapped reads
-    void* write_event = nullptr;  // Manual-reset event for overlapped writes
+    explicit PipeConnection(asio::io_context& io_ctx, int id);
 #else
-    std::string read_buffer;      // Line-based framing accumulator
+    explicit PipeConnection(asio::local::stream_protocol::socket s, int id);
 #endif
 
-    LocalPipeConnection(HandleType h, int id) : handle(h), connection_id(id) {}
-
-    bool write_message(const std::string& data);
+    void start_read();
+    void handle_line(const std::string& line);
+    void enqueue_write(std::string data);
+    void start_write();
 };
 
 class LocalPipeTransport : public ITransport {
@@ -67,34 +69,27 @@ public:
     void send_message(const nlohmann::json& message) override;
     void set_message_handler(MessageCallback handler) override;
     void set_error_handler(ErrorCallback handler) override;
+    void set_response_sender(ResponseSender sender) override;
+    void set_io_context(asio::io_context* io_ctx) override;
 
 private:
     std::string resolve_pipe_path() const;
 
-    void accept_loop();
-    void client_read_loop(std::shared_ptr<LocalPipeConnection> conn);
-    std::string read_message(std::shared_ptr<LocalPipeConnection> conn);
+#ifdef _WIN32
+    void win32_accept_loop();
+    std::thread win32_accept_thread_;
+#else
+    void do_accept();
+    std::unique_ptr<asio::local::stream_protocol::acceptor> acceptor_;
+#endif
 
     LocalPipeConfig config_;
+    asio::io_context* io_ctx_ = nullptr;
     std::atomic<bool> running_{false};
     std::atomic<int> next_connection_id_{0};
 
-    std::mutex responding_mutex_;
-    std::shared_ptr<LocalPipeConnection> responding_connection_;
-
-    std::thread accept_thread_;
-
-#ifdef _WIN32
-    void* accept_event_ = nullptr;  // Manual-reset event for overlapped ConnectNamedPipe
-#else
-    int listen_fd_ = -1;
-#endif
-
-    std::mutex connections_mutex_;
-    std::vector<std::shared_ptr<LocalPipeConnection>> active_connections_;
-
-    std::mutex stop_mutex_;
-    std::condition_variable stop_cv_;  // Replaces busy-wait on stop signal
+    std::shared_mutex connections_mutex_;
+    std::vector<std::shared_ptr<PipeConnection>> active_connections_;
 
     MessageCallback message_handler_;
     ErrorCallback error_handler_;

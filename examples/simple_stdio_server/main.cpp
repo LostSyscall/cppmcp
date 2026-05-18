@@ -2,14 +2,10 @@
 #include <cppmcp/stdio_transport.hpp>
 #include <cppmcp/types.hpp>
 
-#include <csignal>
 #include <iostream>
 
 using namespace cppmcp;
 using json = nlohmann::json;
-
-static McpServer* g_server = nullptr;
-void signal_handler(int) { if (g_server) g_server->stop(); }
 
 int main() {
     Implementation info{"cppmcp_stdio_example", "1.0.0"};
@@ -106,10 +102,6 @@ int main() {
 
     auto transport = std::make_shared<StdioTransport>();
     server.connect(transport);
-
-    g_server = &server;
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
 
     std::cerr << "[cppmcp_stdio_example] Starting stdio MCP server..." << std::endl;
     server.run();

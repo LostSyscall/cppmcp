@@ -2,14 +2,10 @@
 #include <cppmcp/http_transport.hpp>
 #include <cppmcp/types.hpp>
 
-#include <csignal>
 #include <iostream>
 
 using namespace cppmcp;
 using json = nlohmann::json;
-
-static McpServer* g_server = nullptr;
-void signal_handler(int) { if (g_server) g_server->stop(); }
 
 int main() {
     Implementation info{"cppmcp_http_example", "1.0.0"};
@@ -76,10 +72,6 @@ int main() {
 
     auto transport = std::make_shared<HttpTransport>(config);
     server.connect(transport);
-
-    g_server = &server;
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
 
     std::cerr << "[cppmcp_http_example] Starting Streamable HTTP MCP server on http://127.0.0.1:3000/mcp..." << std::endl;
     server.run();

@@ -83,55 +83,53 @@ ParsedMessage parse_message(const nlohmann::json& raw) {
     }
 }
 
-nlohmann::json make_success_response(const RequestId& id, const nlohmann::json& result) {
-    nlohmann::json j;
-    j["jsonrpc"] = "2.0";
-    j["id"] = request_id_to_json(id);
-    j["result"] = result;
-    return j;
+nlohmann::json make_success_response(const RequestId& id, nlohmann::json result) {
+    return nlohmann::json{
+        {"jsonrpc", "2.0"},
+        {"id", request_id_to_json(id)},
+        {"result", std::move(result)}
+    };
 }
 
 nlohmann::json make_error_response(const RequestId& id, int code,
                                    const std::string& message,
                                    std::optional<nlohmann::json> data) {
-    nlohmann::json j;
-    j["jsonrpc"] = "2.0";
-    j["id"] = request_id_to_json(id);
-    nlohmann::json error_obj;
-    error_obj["code"] = code;
-    error_obj["message"] = message;
-    if (data) error_obj["data"] = *data;
-    j["error"] = error_obj;
-    return j;
+    nlohmann::json error_obj = nlohmann::json{{"code", code}, {"message", message}};
+    if (data) error_obj["data"] = std::move(*data);
+    return nlohmann::json{
+        {"jsonrpc", "2.0"},
+        {"id", request_id_to_json(id)},
+        {"error", std::move(error_obj)}
+    };
 }
 
 nlohmann::json make_error_response_null_id(int code, const std::string& message,
                                             std::optional<nlohmann::json> data) {
-    nlohmann::json j;
-    j["jsonrpc"] = "2.0";
-    j["id"] = nullptr;
-    nlohmann::json error_obj;
-    error_obj["code"] = code;
-    error_obj["message"] = message;
-    if (data) error_obj["data"] = *data;
-    j["error"] = error_obj;
-    return j;
+    nlohmann::json error_obj = nlohmann::json{{"code", code}, {"message", message}};
+    if (data) error_obj["data"] = std::move(*data);
+    return nlohmann::json{
+        {"jsonrpc", "2.0"},
+        {"id", nullptr},
+        {"error", std::move(error_obj)}
+    };
 }
 
 nlohmann::json serialize_request(const JsonRpcRequest& req) {
-    nlohmann::json j;
-    j["jsonrpc"] = "2.0";
-    j["id"] = request_id_to_json(req.id);
-    j["method"] = req.method;
-    if (req.params) j["params"] = *req.params;
+    nlohmann::json j = nlohmann::json{
+        {"jsonrpc", "2.0"},
+        {"id", request_id_to_json(req.id)},
+        {"method", req.method}
+    };
+    if (req.params) j["params"] = std::move(*req.params);
     return j;
 }
 
 nlohmann::json serialize_notification(const JsonRpcNotification& notif) {
-    nlohmann::json j;
-    j["jsonrpc"] = "2.0";
-    j["method"] = notif.method;
-    if (notif.params) j["params"] = *notif.params;
+    nlohmann::json j = nlohmann::json{
+        {"jsonrpc", "2.0"},
+        {"method", notif.method}
+    };
+    if (notif.params) j["params"] = std::move(*notif.params);
     return j;
 }
 
