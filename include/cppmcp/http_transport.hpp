@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <list>
 #include <map>
@@ -38,6 +39,7 @@ struct HttpTransportConfig {
     size_t write_queue_max_bytes = 0;
     QueueOverflowPolicy write_queue_overflow = QueueOverflowPolicy::DropNewest;
     size_t max_connections = 1024;  // 0 = unlimited
+    std::chrono::milliseconds read_timeout{0};  // 0 = disabled (request-read phase only)
 };
 
 struct HttpConnection : std::enable_shared_from_this<HttpConnection> {
@@ -54,6 +56,8 @@ struct HttpConnection : std::enable_shared_from_this<HttpConnection> {
     std::atomic<bool> active{true};
     bool request_complete = false;
     size_t max_body_size = 1024 * 1024;
+    asio::steady_timer read_timer_;
+    std::chrono::milliseconds read_timeout_{0};
 
     // Single serialized write queue for this connection's socket. Shared with
     // any SseConnection that wraps this HttpConnection, so handshake headers
@@ -112,6 +116,7 @@ private:
 
     // Streamable HTTP handlers
     void handle_post(std::shared_ptr<HttpConnection> conn);
+    void handle_post_batch(std::shared_ptr<HttpConnection> conn, const nlohmann::json& batch, const std::string& req_session_id);
     void handle_get_sse(std::shared_ptr<HttpConnection> conn);
     void handle_delete(std::shared_ptr<HttpConnection> conn);
     void handle_options(std::shared_ptr<HttpConnection> conn);

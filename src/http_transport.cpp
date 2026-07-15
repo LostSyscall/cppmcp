@@ -11,7 +11,7 @@ namespace cppmcp {
 
 // --- HttpConnection ---
 HttpConnection::HttpConnection(asio::ip::tcp::socket s)
-    : socket(std::move(s)) {
+    : socket(std::move(s)), read_timer_(socket.get_executor()) {
     llhttp_settings_init(&parser_settings);
 
     parser_settings.on_url = [](llhttp_t* parser, const char* at, size_t length) {
@@ -81,8 +81,22 @@ HttpConnection::HttpConnection(asio::ip::tcp::socket s)
 
 void HttpConnection::start_read_with_dispatch(HttpTransport* transport) {
     auto self = shared_from_this();
+    if (read_timeout_ > std::chrono::milliseconds(0)) {
+        read_timer_.expires_after(read_timeout_);
+        read_timer_.async_wait([this, self](const asio::error_code& ec) {
+            if (ec) {
+                return;  // canceled by the read completion
+            }
+            asio::error_code ignore;
+            socket.close(ignore);  // cancel the in-flight async_read
+            on_error();
+        });
+    }
     asio::async_read(socket, read_buf, asio::transfer_at_least(1),
         [this, self, transport](const asio::error_code& ec, std::size_t bytes_transferred) {
+            if (read_timeout_ > std::chrono::milliseconds(0)) {
+                read_timer_.cancel();
+            }
             if (ec) {
                 on_error();
                 return;
@@ -328,6 +342,7 @@ void HttpTransport::do_accept() {
             socket.set_option(asio::ip::tcp::no_delay(true), no_delay_ec);
             auto conn = std::make_shared<HttpConnection>(std::move(socket));
             conn->max_body_size = config_.max_body_size;
+            conn->read_timeout_ = config_.read_timeout;
             conn->init_write_queue(config_.write_queue_max_bytes, config_.write_queue_overflow);
             conn->on_disconnect = [this]() {
                 if (active_connection_count_.load(std::memory_order_relaxed) > 0) {
@@ -418,15 +433,20 @@ void HttpTransport::handle_post(std::shared_ptr<HttpConnection> conn) {
     }
 
     nlohmann::json json_msg;
-    ParsedMessage parsed;
     try {
         json_msg = nlohmann::json::parse(conn->current_body);
-        parsed = parse_message(json_msg);
     } catch (const nlohmann::json::parse_error& e) {
         auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());
         conn->enqueue_write(build_http_response(200, "application/json", error_resp.dump()));
         return;
     }
+
+    if (json_msg.is_array()) {
+        handle_post_batch(conn, json_msg, req_session_id);
+        return;
+    }
+
+    ParsedMessage parsed = parse_message(json_msg);
 
     auto session_header = [](const std::string& sid) {
         std::vector<std::pair<std::string, std::string>> h;
@@ -523,6 +543,61 @@ void HttpTransport::handle_post(std::shared_ptr<HttpConnection> conn) {
         std::vector<std::pair<std::string, std::string>> h;
         if (!response_session_id.empty()) h.emplace_back("mcp-session-id", response_session_id);
         conn->enqueue_write(build_http_response(202, "text/plain", "", h));
+    }
+}
+
+// --- Streamable HTTP: batch (JSON-RPC array) ---
+// Note: elements are dispatched synchronously on the io thread. If a worker
+// pool is configured, deferrable elements (tools/call etc.) still run through
+// on_message and may be deferred — their responses are collected only if they
+// complete synchronously. Prefer non-deferrable elements in batches, or run
+// without a worker pool for full batch support.
+void HttpTransport::handle_post_batch(std::shared_ptr<HttpConnection> conn,
+                                      const nlohmann::json& batch,
+                                      const std::string& req_session_id) {
+    if (batch.empty()) {
+        auto e = make_error_response_null_id(Protocol::INVALID_REQUEST, "Invalid Request");
+        conn->enqueue_write(build_http_response(200, "application/json", e.dump()));
+        return;
+    }
+    auto session = find_session(req_session_id);
+    if (!session || !session->initialized.load()) {
+        conn->enqueue_write(build_http_response(404, "text/plain", "Session not found"));
+        return;
+    }
+    const std::string& sid = session->session_id;
+
+    std::vector<nlohmann::json> responses;
+    for (const auto& elem : batch) {
+        auto body = std::make_shared<nlohmann::json>();
+        auto captured = std::make_shared<bool>(false);
+        ITransport::ResponseSink sub_sink = [body, captured](const nlohmann::json& r) {
+            if (!*captured) {
+                *body = r;
+                *captured = true;
+            }
+        };
+        try {
+            message_handler_(elem, sub_sink, sid);
+        } catch (...) {
+            // per-element failure does not abort the batch
+        }
+        if (*captured) {
+            responses.push_back(*body);
+        }
+    }
+
+    std::vector<std::pair<std::string, std::string>> h;
+    if (!sid.empty()) h.emplace_back("mcp-session-id", sid);
+    if (responses.empty()) {
+        // All notifications: no response body.
+        conn->enqueue_write(build_http_response(202, "text/plain", "", h));
+    } else {
+        nlohmann::json arr = nlohmann::json::array();
+        for (auto& r : responses) {
+            arr.push_back(std::move(r));
+        }
+        conn->enqueue_write(build_http_response(200, "application/json", arr.dump(), h));
     }
 }
 
