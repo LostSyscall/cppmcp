@@ -83,6 +83,7 @@ public:
     // tools/call, resources/read and prompts/get handlers run on the pool so
     // they don't block the transport's io loop. 0 = synchronous (default).
     void set_worker_threads(std::size_t n);
+    void set_io_threads(std::size_t n);
 
     // Invalidate cached list-handler results (call after mutating the
     // underlying tool/resource/prompt sets).
@@ -145,6 +146,7 @@ private:
     asio::signal_set signals_;
     std::unique_ptr<RequestExecutor> executor_;
     std::size_t configured_workers_ = 0;
+    std::size_t configured_io_threads_ = 0;
     ListCache list_cache_;
     mutable std::mutex list_cache_mutex_;
     std::atomic<bool> list_cache_enabled_{true};

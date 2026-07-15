@@ -18,24 +18,24 @@ namespace cppmcp {
 // --- PipeConnection ---
 #ifdef _WIN32
 PipeConnection::PipeConnection(asio::io_context& io_ctx, int id)
-    : stream_handle(io_ctx), connection_id(id) {}
+    : stream_handle(io_ctx), strand_(stream_handle.get_executor()), connection_id(id) {}
 #else
 PipeConnection::PipeConnection(asio::local::stream_protocol::socket s, int id)
-    : socket(std::move(s)), connection_id(id) {}
+    : socket(std::move(s)), strand_(socket.get_executor()), connection_id(id) {}
 #endif
 
 void PipeConnection::start_read() {
     auto self = shared_from_this();
 #ifdef _WIN32
     asio::async_read_until(stream_handle, read_buf, '\n',
-        [this, self](const asio::error_code& ec, std::size_t bytes_transferred) {
+        asio::bind_executor(strand_, [this, self](const asio::error_code& ec, std::size_t bytes_transferred) {
             handle_read_completion(ec, bytes_transferred);
-        });
+        }));
 #else
     asio::async_read_until(socket, read_buf, '\n',
-        [this, self](const asio::error_code& ec, std::size_t bytes_transferred) {
+        asio::bind_executor(strand_, [this, self](const asio::error_code& ec, std::size_t bytes_transferred) {
             handle_read_completion(ec, bytes_transferred);
-        });
+        }));
 #endif
 }
 

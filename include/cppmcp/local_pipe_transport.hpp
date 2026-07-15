@@ -38,6 +38,7 @@ struct PipeConnection : std::enable_shared_from_this<PipeConnection> {
 #else
     asio::local::stream_protocol::socket socket;
 #endif
+    asio::strand<asio::any_io_executor> strand_;
     asio::streambuf read_buf;
     std::shared_ptr<AsyncWriteQueue> write_queue;
     std::atomic<bool> active{true};

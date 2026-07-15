@@ -11,7 +11,7 @@ namespace cppmcp {
 
 // --- HttpConnection ---
 HttpConnection::HttpConnection(asio::ip::tcp::socket s)
-    : socket(std::move(s)), read_timer_(socket.get_executor()) {
+    : socket(std::move(s)), strand_(socket.get_executor()), read_timer_(socket.get_executor()) {
     llhttp_settings_init(&parser_settings);
 
     parser_settings.on_url = [](llhttp_t* parser, const char* at, size_t length) {
@@ -83,17 +83,17 @@ void HttpConnection::start_read_with_dispatch(HttpTransport* transport) {
     auto self = shared_from_this();
     if (read_timeout_ > std::chrono::milliseconds(0)) {
         read_timer_.expires_after(read_timeout_);
-        read_timer_.async_wait([this, self](const asio::error_code& ec) {
+        read_timer_.async_wait(asio::bind_executor(strand_, [this, self](const asio::error_code& ec) {
             if (ec) {
                 return;  // canceled by the read completion
             }
             asio::error_code ignore;
             socket.close(ignore);  // cancel the in-flight async_read
             on_error();
-        });
+        }));
     }
     asio::async_read(socket, read_buf, asio::transfer_at_least(1),
-        [this, self, transport](const asio::error_code& ec, std::size_t bytes_transferred) {
+        asio::bind_executor(strand_, [this, self, transport](const asio::error_code& ec, std::size_t bytes_transferred) {
             if (read_timeout_ > std::chrono::milliseconds(0)) {
                 read_timer_.cancel();
             }
@@ -149,7 +149,7 @@ void HttpConnection::start_read_with_dispatch(HttpTransport* transport) {
             if (active) {
                 start_read_with_dispatch(transport);
             }
-        });
+        }));
 }
 
 void HttpConnection::enqueue_write(std::string data) {

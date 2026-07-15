@@ -44,6 +44,7 @@ struct HttpTransportConfig {
 
 struct HttpConnection : std::enable_shared_from_this<HttpConnection> {
     asio::ip::tcp::socket socket;
+    asio::strand<asio::any_io_executor> strand_;
     llhttp_t parser;
     llhttp_settings_t parser_settings;
     asio::streambuf read_buf;

@@ -126,6 +126,13 @@ void McpServer::set_worker_threads(std::size_t n) {
     configured_workers_ = n;
 }
 
+void McpServer::set_io_threads(std::size_t n) {
+    if (running_.load(std::memory_order_relaxed)) {
+        return;  // must be configured before run()
+    }
+    configured_io_threads_ = n;
+}
+
 void McpServer::invalidate_list_cache() {
     std::lock_guard<std::mutex> lock(list_cache_mutex_);
     list_cache_.tools_list_result.reset();
@@ -177,7 +184,16 @@ void McpServer::run() {
         return;
     }
 
-    io_ctx_.run();
+    std::vector<std::thread> io_pool;
+    for (std::size_t i = 1; i < configured_io_threads_; ++i) {
+        io_pool.emplace_back([this]() { io_ctx_.run(); });
+    }
+    io_ctx_.run();  // main thread also runs the loop
+    for (auto& t : io_pool) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
 }
 
 void McpServer::stop() {
