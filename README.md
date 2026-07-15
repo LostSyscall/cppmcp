@@ -1,19 +1,23 @@
-# cppmcp — C++ MCP Server Library
+# cppmcp — C++ MCP Server & Client Library
 **[中文](docs/zh-CN/README.md)**
 
-A C++ implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server, conforming to MCP specification version `2025-03-26`. Supports four transport modes: stdio, SSE, Streamable HTTP, and local pipe (Windows Named Pipe / Unix Domain Socket), using JSON-RPC 2.0 for protocol communication.
+A C++ implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) **server and client**, conforming to MCP specification version `2025-03-26`. The server supports four transport modes (stdio, SSE, Streamable HTTP, local pipe). The client connects via stdio (spawn child process), Streamable HTTP, or local pipe. All communication uses JSON-RPC 2.0.
 
 
 ## Features
 
-- **Four transport modes**: stdio, SSE (legacy HTTP), Streamable HTTP, local pipe
+- **Server: four transport modes** — stdio, SSE (legacy HTTP), Streamable HTTP, local pipe
+- **Client: three transport modes** — stdio (spawn a child server process), Streamable HTTP, local pipe
 - **Fully async I/O**: asio unified event loop + llhttp HTTP parser, zero thread kidnapping, zero polling
-- **Full MCP protocol**: Tools, Resources, Prompts, Completions, Logging
+- **Full MCP protocol (server)**: Tools, Resources, Prompts, Completions, Logging
+- **Full MCP client**: list/call tools, read resources, get prompts, ping; handles server→client `sampling`/`elicitation`/`roots` and auto-answers `ping`
+- **Dual-form client API**: fluent `RequestBuilder` with `on_complete`/`on_error`/`on_progress` + `std::future` (`PendingRequest::get()`), plus blocking convenience wrappers (`call_tool`, `list_tools`, ...)
 - **Progress reporting**: real-time progress notifications during tool calls
+- **High concurrency**: each `McpClient` owns an `asio::strand`; multiple clients coexist or share one `io_context`
 - **Cross-platform**: Windows (MSVC 2019+) and Linux (GCC 11+)
 - **C++17**: no advanced feature dependencies, VS2019 compatible
 - **Lightweight deps**: only nlohmann-json, asio, llhttp
-- **Full test coverage**: 36 unit tests + 18 real I/O integration tests, verified on Windows & Linux
+- **Full test coverage**: 45 unit tests + 29 real I/O integration tests (73 total), verified on Windows & Linux
 
 ## Quick Start
 
@@ -68,26 +72,34 @@ docker compose run dev bash # Interactive dev shell
 ```
 cppmcp/
 ├── include/cppmcp/          # Public headers
-│   ├── server.hpp           # McpServer core class
-│   ├── transport.hpp        # ITransport abstract interface
-│   ├── types.hpp            # MCP types (Tool, Resource, Prompt, etc.)
+│   ├── server.hpp           # McpServer core class (server)
+│   ├── transport.hpp        # ITransport abstract interface (server)
+│   ├── types.hpp            # MCP types (Tool, Resource, Prompt, CallToolResult, ...)
 │   ├── jsonrpc.hpp          # JSON-RPC 2.0 message parsing
 │   ├── protocol.hpp         # Protocol constants & method names
 │   ├── context.hpp          # RequestContext (progress, logging)
 │   ├── exception.hpp        # Exception types
 │   ├── common.hpp           # RequestId variant & utilities
-│   ├── stdio_transport.hpp  # StdioTransport
-│   ├── http_transport.hpp   # HttpTransport (SSE + Streamable HTTP)
-│   └── local_pipe_transport.hpp # LocalPipeTransport
+│   ├── stdio_transport.hpp  # StdioTransport (server)
+│   ├── http_transport.hpp   # HttpTransport (SSE + Streamable HTTP, server)
+│   ├── local_pipe_transport.hpp # LocalPipeTransport (server)
+│   ├── client.hpp           # McpClient core class (client)
+│   ├── pending_request.hpp  # PendingRequest (future + callbacks + state machine)
+│   ├── client_transport.hpp # IClientTransport abstract interface (client)
+│   ├── stdio_client_transport.hpp  # StdioClientTransport (spawn child)
+│   ├── http_client_transport.hpp   # HttpClientTransport (Streamable HTTP)
+│   ├── local_pipe_client_transport.hpp # LocalPipeClientTransport
+│   └── process.hpp          # Cross-platform child-process spawn
 ├── src/                     # Implementation files
-├── examples/                # Example servers
+├── examples/                # Example servers + client demo
 │   ├── simple_stdio_server/
 │   ├── streamable_http_server/
 │   ├── http_sse_server/
-│   └── local_pipe_server/
+│   ├── local_pipe_server/
+│   └── client_demo/         # McpClient ↔ local-pipe server end-to-end demo
 ├── tests/                   # Unit & integration tests
-│   ├── test_*.cpp           # 36 unit tests (TestTransport mock)
-│   └── integration/         # 18 real I/O integration tests
+│   ├── test_*.cpp           # 45 unit tests (incl. test_client.cpp mock)
+│   └── integration/         # 29 real I/O integration tests (incl. McpClient)
 ├── docs/zh-CN/              # Chinese documentation
 ├── Dockerfile               # Docker multi-stage build
 ├── docker-compose.yml
@@ -239,6 +251,53 @@ server.register_prompt("greet", greet,
     });
 ```
 
+### MCP Client
+
+Connect to any MCP server — spawn it as a child process (`StdioClientTransport`), or reach it over HTTP / local pipe — then list and call its tools:
+
+```cpp
+#include <cppmcp/client.hpp>
+#include <cppmcp/stdio_client_transport.hpp>
+
+using namespace cppmcp;
+
+int main() {
+    auto client = std::make_shared<McpClient>(Implementation{"my_client", "1.0.0"});
+    client->use_transport(std::make_shared<StdioClientTransport>("./my_server"));
+
+    auto server_info = client->connect();   // blocking initialize handshake
+
+    // Blocking convenience API
+    auto tools = client->list_tools();
+    CallToolResult r = client->call_tool("echo", nlohmann::json{{"message", "hi"}});
+
+    // Async builder: callbacks + std::future, both usable
+    auto pr = client->prepare(Protocol::METHOD_TOOLS_CALL,
+                    nlohmann::json{{"name", "echo"},
+                                   {"arguments", nlohmann::json{{"message", "async"}}}})
+                  .on_progress([](double p, std::optional<double> total) { /* ... */ })
+                  .timeout(std::chrono::seconds(30))
+                  .send();
+    nlohmann::json result = pr->get();      // or rely solely on callbacks
+
+    client->stop();
+}
+```
+
+Other transports: `HttpClientTransport(host, port, "/mcp")`, `LocalPipeClientTransport(pipe_name)`. To answer server→client requests, register handlers before connecting:
+
+```cpp
+client->register_roots_handler([]() -> ListRootsResult {
+    ListRootsResult r;
+    r.roots.push_back(Root{"file:///workspace", "workspace"});
+    return r;
+});
+client->register_sampling_handler(...);     // sampling/createMessage
+client->register_elicitation_handler(...);  // elicitation/create
+```
+
+Multiple `McpClient`s run independently; to share one event loop across them, call `client->set_io_context(&io)` before `connect()`. Callbacks normally fire on the client's strand — move them off with `set_callback_executor(...)`.
+
 ## Core Classes
 
 ### McpServer
@@ -282,6 +341,43 @@ Abstract transport interface. All transport implementations inherit from this.
 |--------|-------------|
 | `get_port()` | Get actual listening port (supports port=0 random assignment) |
 
+### McpClient (client)
+
+Main client class — owns an `asio::io_context` (or attaches to an external one) and correlates responses to outbound requests by id.
+
+| Method | Description |
+|--------|-------------|
+| `McpClient(client_info, capabilities)` | Construct (self-owned io_context) |
+| `set_io_context(io_ctx)` | Attach to an external io_context (no internal thread) |
+| `set_worker_threads(n)` | Worker pool for slow server→client handlers |
+| `set_callback_executor(exec)` | Move user callbacks off the strand |
+| `use_transport(transport)` | Attach an `IClientTransport` |
+| `connect(timeout)` | Start io, connect transport, run `initialize` handshake (blocking) |
+| `async_connect(timeout)` | Non-blocking handshake; returns the initialize `PendingRequest` |
+| `disconnect()` / `stop()` | Close transport / full shutdown (idempotent) |
+| `prepare(method, params)` | Build an outbound request (`RequestBuilder`) |
+| `send_notification(method, params)` | Fire-and-forget notification |
+| `list_tools` / `call_tool` / `list_resources` / `read_resource` / `list_prompts` / `get_prompt` / `ping` / `set_logging_level` | Blocking convenience wrappers |
+| `register_sampling_handler` / `register_elicitation_handler` / `register_roots_handler` | Handle server→client requests |
+| `on_disconnect(handler)` | Peer-disconnect callback |
+| `has_capability(name)` | Check negotiated server capability ("tools"/"resources"/...) |
+
+### RequestBuilder / PendingRequest
+
+`prepare(...)` returns a `RequestBuilder`; `.send()` returns a `std::shared_ptr<PendingRequest>`.
+
+| Item | Description |
+|--------|-------------|
+| `.on_complete(json)` / `.on_error(McpOutcome)` / `.on_progress(double, total?)` / `.timeout(dur)` | Builder config (set before `send()`) |
+| `PendingRequest::get()` | Block until terminal; returns result, throws `McpException` on failure |
+| `PendingRequest::wait_for(dur)` | Timed wait |
+| `PendingRequest::cancel(reason)` | Post a cancel (sends `notifications/cancelled`) |
+| `PendingRequest::state()` | Current `RequestState` (Waiting/Succeeded/Errored/TimedOut/Cancelled/Failed) |
+
+### IClientTransport (client)
+
+Abstract client-transport interface (note: NO `ResponseSink`, unlike `ITransport`). Implementations: `StdioClientTransport`, `HttpClientTransport`, `LocalPipeClientTransport`.
+
 ## Transport Modes
 
 | Mode | Use case | Connection |
@@ -310,18 +406,19 @@ High-performance local inter-process communication:
 
 ## Testing
 
-The project contains 54 Google Test tests across two tiers:
+The project contains 73 Google Test tests across two tiers:
 
-### Unit Tests (36)
+### Unit Tests (45)
 
-Using TestTransport mock (no real I/O):
+Using TestTransport / TestClientTransport mocks (no real I/O):
 
 - JSON-RPC 2.0 parsing & serialization (10)
 - MCP type serialization (9)
 - Server core logic (8)
 - Integration: Resources, Prompts, notifications (9)
+- Client core (9): outbound response correlation, error→throw, timeout, cancel, progress routing, shutdown-fails-pending, inbound roots/sampling dispatch, ping auto-answer
 
-### Integration Tests (18)
+### Integration Tests (29)
 
 Using real I/O transports, verified on Windows & Linux:
 
@@ -329,6 +426,7 @@ Using real I/O transports, verified on Windows & Linux:
 - Streamable HTTP real requests: Initialize, Ping, ToolsCall, SessionId, Notification202, Delete (6)
 - SSE real streaming: ConnectGetEndpoint, InitializeViaPost, ToolsCallViaSse, ResourcesRead (4)
 - Stdio subprocess pipes: InitializeAndPing, ToolsCall, ToolsList, MalformedJson (4)
+- **McpClient end-to-end (11)**: `McpClientStdio` (spawn `cppmcp_test_stdio_server`, handshake/list/call/progress/shutdown, builder callback form), `McpClientHttp` (real Streamable HTTP server), `client_demo` (local pipe)
 
 ## CMake Options
 

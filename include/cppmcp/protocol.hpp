@@ -25,6 +25,11 @@ constexpr const char* METHOD_PROMPTS_GET = "prompts/get";
 constexpr const char* METHOD_COMPLETION_COMPLETE = "completion/complete";
 constexpr const char* METHOD_LOGGING_SET_LEVEL = "logging/setLevel";
 
+// Server -> client request method names (client handles inbound, replies)
+constexpr const char* METHOD_SAMPLING_CREATE = "sampling/createMessage";
+constexpr const char* METHOD_ELICITATION_CREATE = "elicitation/create";
+constexpr const char* METHOD_ROOTS_LIST = "roots/list";
+
 // Notification method names
 constexpr const char* NOTIF_INITIALIZED = "notifications/initialized";
 constexpr const char* NOTIF_PROGRESS = "notifications/progress";

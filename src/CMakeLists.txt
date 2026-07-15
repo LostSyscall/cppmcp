@@ -8,6 +8,12 @@ add_library(cppmcp_lib
     local_pipe_transport.cpp
     logging.cpp
     request_executor.cpp
+    client.cpp
+    pending_request.cpp
+    process.cpp
+    stdio_client_transport.cpp
+    local_pipe_client_transport.cpp
+    http_client_transport.cpp
 )
 
 target_include_directories(cppmcp_lib PUBLIC

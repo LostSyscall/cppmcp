@@ -1,17 +1,21 @@
-# cppmcp — C++ MCP 服务器库
+# cppmcp — C++ MCP 服务器与客户端库
 
-C++ 实现的 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/) 服务器库，符合 MCP 协议规范 `2025-03-26` 版本。支持四种传输模式：标准输入输出（stdio）、SSE、Streamable HTTP、本地管道（Windows Named Pipe / Unix Domain Socket），使用 JSON-RPC 2.0 进行协议通信。
+C++ 实现的 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/) **服务器与客户端**库，符合 MCP 协议规范 `2025-03-26` 版本。服务器支持四种传输模式：标准输入输出（stdio）、SSE、Streamable HTTP、本地管道（Windows Named Pipe / Unix Domain Socket）；客户端支持三种连接方式：stdio（拉起子进程）、Streamable HTTP、本地管道。全部使用 JSON-RPC 2.0 进行协议通信。
 
 ## 特性
 
-- **四种传输模式**：stdio、SSE（传统 HTTP）、Streamable HTTP、本地管道
+- **服务器：四种传输模式** — stdio、SSE（传统 HTTP）、Streamable HTTP、本地管道
+- **客户端：三种传输模式** — stdio（拉起子进程作为 server）、Streamable HTTP、本地管道
 - **全异步 I/O**：asio 统一事件循环 + llhttp HTTP 解析，零线程绑架、零轮询
-- **完整 MCP 协议**：Tools、Resources、Prompts、Completions、Logging
+- **完整 MCP 协议（服务器）**：Tools、Resources、Prompts、Completions、Logging
+- **完整 MCP 客户端**：list/call 工具、读资源、取 Prompt、ping；支持 server→client 的 `sampling`/`elicitation`/`roots`，并自动应答 `ping`
+- **客户端双形态 API**：流式 `RequestBuilder`（`on_complete`/`on_error`/`on_progress`）+ `std::future`（`PendingRequest::get()`），另有阻塞便捷封装（`call_tool`、`list_tools` 等）
 - **进度上报**：Tool 调用支持实时进度通知
+- **高并发**：每个 `McpClient` 自带 `asio::strand`；多个客户端可并存，也可共享同一个 `io_context`
 - **跨平台**：Windows（MSVC 2019+）与 Linux（GCC 11+）
 - **C++17**：无依赖高级特性，兼容 VS2019
 - **轻量依赖**：仅 nlohmann-json、asio、llhttp
-- **完整测试**：36 单元测试 + 18 真实 I/O 集成测试，Windows/Linux 双平台验证
+- **完整测试**：45 单元测试 + 29 真实 I/O 集成测试（共 73 个），Windows/Linux 双平台验证
 
 ## 快速开始
 
@@ -61,31 +65,41 @@ docker compose run dev bash # 开发环境交互式 shell
 ```
 cppmcp/
 ├── include/cppmcp/          # 公共头文件
-│   ├── server.hpp           # McpServer 核心类
-│   ├── transport.hpp        # ITransport 抽象接口
-│   ├── types.hpp            # MCP 类型定义（Tool, Resource, Prompt 等）
+│   ├── server.hpp           # McpServer 核心类（服务器）
+│   ├── transport.hpp        # ITransport 抽象接口（服务器）
+│   ├── types.hpp            # MCP 类型定义（Tool, Resource, Prompt, CallToolResult 等）
 │   ├── jsonrpc.hpp          # JSON-RPC 2.0 消息解析
 │   ├── protocol.hpp         # 协议常量与方法名
 │   ├── context.hpp          # RequestContext（进度上报、日志）
 │   ├── exception.hpp        # 异常类型
 │   ├── common.hpp           # RequestId 变体与通用工具
 │   ├── error_codes.hpp      # JSON-RPC 错误码常量
-│   ├── stdio_transport.hpp  # StdioTransport
-│   ├── http_transport.hpp   # HttpTransport（SSE + Streamable HTTP）
-│   └── local_pipe_transport.hpp # LocalPipeTransport
+│   ├── stdio_transport.hpp  # StdioTransport（服务器）
+│   ├── http_transport.hpp   # HttpTransport（SSE + Streamable HTTP，服务器）
+│   ├── local_pipe_transport.hpp # LocalPipeTransport（服务器）
+│   ├── client.hpp           # McpClient 核心类（客户端）
+│   ├── pending_request.hpp  # PendingRequest（future + 回调 + 状态机）
+│   ├── client_transport.hpp # IClientTransport 抽象接口（客户端）
+│   ├── stdio_client_transport.hpp  # StdioClientTransport（拉起子进程）
+│   ├── http_client_transport.hpp   # HttpClientTransport（Streamable HTTP）
+│   ├── local_pipe_client_transport.hpp # LocalPipeClientTransport
+│   └── process.hpp          # 跨平台子进程拉起
 ├── src/                     # 实现文件
-├── examples/                # 示例服务器
+├── examples/                # 示例服务器 + 客户端示例
 │   ├── simple_stdio_server/   # stdio 模式示例
 │   ├── streamable_http_server/ # Streamable HTTP 模式示例
 │   ├── http_sse_server/       # SSE 模式示例
-│   └── local_pipe_server/     # 本地管道模式示例
+│   ├── local_pipe_server/     # 本地管道模式示例
+│   └── client_demo/           # McpClient ↔ 本地管道服务器 端到端示例
 ├── tests/                   # 单元与集成测试
-│   ├── test_*.cpp           # 36 个单元测试（TestTransport mock）
-│   └── integration/         # 18 个真实 I/O 集成测试
+│   ├── test_*.cpp           # 45 个单元测试（含 test_client.cpp mock）
+│   └── integration/         # 29 个真实 I/O 集成测试（含 McpClient）
 │       ├── test_local_pipe_transport.cpp   # LocalPipe 真实连接测试
 │       ├── test_streamable_http_transport.cpp # HTTP POST 真实请求测试
 │       ├── test_http_sse_transport.cpp     # SSE 流真实推送测试
 │       ├── test_stdio_transport.cpp        # Stdio 子进程管道测试
+│       ├── test_client_stdio.cpp           # McpClient stdio 端到端测试
+│       └── test_client_http.cpp            # McpClient HTTP 端到端测试
 ├── Dockerfile               # Docker 多阶段构建
 ├── docker-compose.yml       # Docker Compose 配置
 ├── vcpkg.json               # vcpkg 依赖清单
@@ -240,6 +254,53 @@ server.register_prompt("greet", greet,
     });
 ```
 
+### MCP 客户端
+
+连接任意 MCP server —— 用 `StdioClientTransport` 拉起一个子进程，或经 HTTP / 本地管道连接 —— 然后列出并调用其工具：
+
+```cpp
+#include <cppmcp/client.hpp>
+#include <cppmcp/stdio_client_transport.hpp>
+
+using namespace cppmcp;
+
+int main() {
+    auto client = std::make_shared<McpClient>(Implementation{"my_client", "1.0.0"});
+    client->use_transport(std::make_shared<StdioClientTransport>("./my_server"));
+
+    auto server_info = client->connect();   // 阻塞式 initialize 握手
+
+    // 阻塞便捷 API
+    auto tools = client->list_tools();
+    CallToolResult r = client->call_tool("echo", nlohmann::json{{"message", "hi"}});
+
+    // 异步 builder：回调 + std::future，两者皆可使用
+    auto pr = client->prepare(Protocol::METHOD_TOOLS_CALL,
+                    nlohmann::json{{"name", "echo"},
+                                   {"arguments", nlohmann::json{{"message", "async"}}}})
+                  .on_progress([](double p, std::optional<double> total) { /* ... */ })
+                  .timeout(std::chrono::seconds(30))
+                  .send();
+    nlohmann::json result = pr->get();      // 也可仅依赖回调
+
+    client->stop();
+}
+```
+
+其它传输：`HttpClientTransport(host, port, "/mcp")`、`LocalPipeClientTransport(pipe_name)`。连接前注册 server→client 的反向调用处理器：
+
+```cpp
+client->register_roots_handler([]() -> ListRootsResult {
+    ListRootsResult r;
+    r.roots.push_back(Root{"file:///workspace", "workspace"});
+    return r;
+});
+client->register_sampling_handler(...);     // sampling/createMessage
+client->register_elicitation_handler(...);  // elicitation/create
+```
+
+多个 `McpClient` 可独立运行；若要让多个客户端共享同一事件循环，在 `connect()` 前调用 `client->set_io_context(&io)`。回调默认在客户端 strand 上触发，可用 `set_callback_executor(...)` 移到其它执行器。
+
 ## 核心类
 
 ### McpServer
@@ -283,6 +344,43 @@ server.register_prompt("greet", greet,
 |------|------|
 | `get_port()` | 获取实际监听端口（支持 port=0 随机分配） |
 
+### McpClient（客户端）
+
+主客户端类 —— 自持 `asio::io_context`（或挂载到外部 io），按 id 关联出站请求与响应。
+
+| 方法 | 说明 |
+|------|------|
+| `McpClient(client_info, capabilities)` | 构造（自持 io_context） |
+| `set_io_context(io_ctx)` | 挂载到外部 io_context（不起内部线程） |
+| `set_worker_threads(n)` | 为慢的 server→client 处理器配线程池 |
+| `set_callback_executor(exec)` | 将用户回调移出 strand |
+| `use_transport(transport)` | 挂载 `IClientTransport` |
+| `connect(timeout)` | 启动 io、连接传输、执行 `initialize` 握手（阻塞） |
+| `async_connect(timeout)` | 非阻塞握手，返回 initialize 的 `PendingRequest` |
+| `disconnect()` / `stop()` | 关闭传输 / 完全停止（幂等） |
+| `prepare(method, params)` | 构造出站请求（`RequestBuilder`） |
+| `send_notification(method, params)` | 发送无需响应的通知 |
+| `list_tools` / `call_tool` / `list_resources` / `read_resource` / `list_prompts` / `get_prompt` / `ping` / `set_logging_level` | 阻塞便捷封装 |
+| `register_sampling_handler` / `register_elicitation_handler` / `register_roots_handler` | 处理 server→client 请求 |
+| `on_disconnect(handler)` | 对端断连回调 |
+| `has_capability(name)` | 检查协商到的 server 能力（"tools"/"resources"/...） |
+
+### RequestBuilder / PendingRequest
+
+`prepare(...)` 返回 `RequestBuilder`；`.send()` 返回 `std::shared_ptr<PendingRequest>`。
+
+| 项 | 说明 |
+|------|------|
+| `.on_complete(json)` / `.on_error(McpOutcome)` / `.on_progress(double, total?)` / `.timeout(dur)` | builder 配置（`send()` 前设置） |
+| `PendingRequest::get()` | 阻塞直到终态；成功返回 result，失败抛 `McpException` |
+| `PendingRequest::wait_for(dur)` | 带超时等待 |
+| `PendingRequest::cancel(reason)` | 发起取消（发送 `notifications/cancelled`） |
+| `PendingRequest::state()` | 当前 `RequestState`（Waiting/Succeeded/Errored/TimedOut/Cancelled/Failed） |
+
+### IClientTransport（客户端）
+
+客户端传输抽象接口（注意：无 `ResponseSink`，与服务器 `ITransport` 不同）。实现：`StdioClientTransport`、`HttpClientTransport`、`LocalPipeClientTransport`。
+
 ### RequestContext
 
 请求上下文，在 Tool/Resource/Prompt 处理器中使用。
@@ -320,18 +418,19 @@ MCP 协议推荐的 HTTP 模式。单端点架构：
 
 ## 测试
 
-项目包含 54 个 Google Test 测试，覆盖两种测试层级：
+项目包含 73 个 Google Test 测试，覆盖两种测试层级：
 
-### 单元测试（36 个）
+### 单元测试（45 个）
 
-使用 TestTransport mock（无真实 I/O），覆盖：
+使用 TestTransport / TestClientTransport mock（无真实 I/O），覆盖：
 
 - JSON-RPC 2.0 解析与序列化（10 个）
 - MCP 类型序列化（9 个）
 - 服务器核心逻辑（8 个）
-- 集成测试：Resources、Prompts、通知（9 个）
+- 集成：Resources、Prompts、通知（9 个）
+- 客户端核心（9 个）：出站响应关联、error→抛异常、超时、取消、progress 路由、shutdown 失败 pending、入站 roots/sampling 分发、ping 自动应答
 
-### 集成测试（18 个）
+### 集成测试（29 个）
 
 使用真实 I/O 传输，在 Windows 和 Linux 上运行，覆盖四种传输模式：
 
@@ -339,6 +438,7 @@ MCP 协议推荐的 HTTP 模式。单端点架构：
 - Streamable HTTP 真实请求：Initialize、Ping、ToolsCall、SessionId、Notification202、Delete（6 个）
 - SSE 真实流推送：ConnectGetEndpoint、InitializeViaPost、ToolsCallViaSse、ResourcesRead（4 个）
 - Stdio 子进程管道：InitializeAndPing、ToolsCall、ToolsList、MalformedJson（4 个）
+- **McpClient 端到端（11 个）**：`McpClientStdio`（拉起 `cppmcp_test_stdio_server`，握手/list/call/progress/shutdown、builder 回调形态）、`McpClientHttp`（真实 Streamable HTTP 服务器）、`client_demo`（本地管道）
 
 ```bash
 # 单元测试

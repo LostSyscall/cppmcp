@@ -9,7 +9,10 @@
 namespace cppmcp {
 
 // NullId represents a JSON-RPC null id (for parse/invalid request errors)
-struct NullId {};
+struct NullId {
+    bool operator==(const NullId&) const noexcept { return true; }
+    bool operator<(const NullId&) const noexcept { return false; }
+};
 
 using RequestId = std::variant<NullId, int64_t, std::string>;
 

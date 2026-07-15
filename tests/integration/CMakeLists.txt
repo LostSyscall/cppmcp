@@ -4,6 +4,8 @@ add_executable(cppmcp_integration_tests
     test_streamable_http_transport.cpp
     test_http_sse_transport.cpp
     test_stdio_transport.cpp
+    test_client_stdio.cpp
+    test_client_http.cpp
 )
 
 target_link_libraries(cppmcp_integration_tests PRIVATE

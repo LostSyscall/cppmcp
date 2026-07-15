@@ -266,6 +266,27 @@ void from_json(const nlohmann::json& j, ServerCapabilities& c) {
     if (j.contains("experimental")) c.experimental = j.at("experimental");
 }
 
+void to_json(nlohmann::json& j, const SamplingCapability&) {
+    j = nlohmann::json::object();
+}
+
+void to_json(nlohmann::json& j, const ElicitationCapability&) {
+    j = nlohmann::json::object();
+}
+
+void to_json(nlohmann::json& j, const RootsCapability& c) {
+    j = nlohmann::json::object();
+    if (c.list_changed) j["listChanged"] = *c.list_changed;
+}
+
+void to_json(nlohmann::json& j, const ClientCapabilities& c) {
+    j = nlohmann::json::object();
+    if (c.sampling) { nlohmann::json sub; to_json(sub, *c.sampling); j["sampling"] = sub; }
+    if (c.elicitation) { nlohmann::json sub; to_json(sub, *c.elicitation); j["elicitation"] = sub; }
+    if (c.roots) { nlohmann::json sub; to_json(sub, *c.roots); j["roots"] = sub; }
+    if (c.experimental) j["experimental"] = *c.experimental;
+}
+
 void to_json(nlohmann::json& j, const Implementation& impl) {
     j = nlohmann::json{{"name", impl.name}, {"version", impl.version}};
 }
@@ -303,6 +324,101 @@ void to_json(nlohmann::json& j, const Completion& c) {
 
 void to_json(nlohmann::json& j, const CompleteResult& r) {
     j = nlohmann::json{{"completion", r.completion}};
+}
+
+void to_json(nlohmann::json& j, const SamplingMessage& m) {
+    j = nlohmann::json{{"role", m.role}, {"content", content_to_json(m.content)}};
+}
+
+void from_json(const nlohmann::json& j, SamplingMessage& m) {
+    j.at("role").get_to(m.role);
+    m.content = content_from_json(j.at("content"));
+}
+
+void to_json(nlohmann::json& j, const CreateMessageRequestParams& p) {
+    nlohmann::json messages = nlohmann::json::array();
+    for (const auto& m : p.messages) {
+        nlohmann::json mj;
+        to_json(mj, m);
+        messages.push_back(mj);
+    }
+    j = nlohmann::json{{"messages", messages}};
+    if (p.model) j["model"] = *p.model;
+    if (p.system_prompt) j["systemPrompt"] = *p.system_prompt;
+    if (p.include_context) j["includeContext"] = *p.include_context;
+    if (p.temperature) j["temperature"] = *p.temperature;
+    if (p.max_tokens) j["maxTokens"] = *p.max_tokens;
+    if (!p.stop_sequences.empty()) j["stopSequences"] = p.stop_sequences;
+    if (p.metadata) j["metadata"] = *p.metadata;
+}
+
+void from_json(const nlohmann::json& j, CreateMessageRequestParams& p) {
+    for (const auto& item : j.at("messages")) {
+        SamplingMessage m;
+        from_json(item, m);
+        p.messages.push_back(m);
+    }
+    if (j.contains("model")) j.at("model").get_to(p.model.emplace());
+    if (j.contains("systemPrompt")) j.at("systemPrompt").get_to(p.system_prompt.emplace());
+    if (j.contains("includeContext")) j.at("includeContext").get_to(p.include_context.emplace());
+    if (j.contains("temperature")) j.at("temperature").get_to(p.temperature.emplace());
+    if (j.contains("maxTokens")) j.at("maxTokens").get_to(p.max_tokens.emplace());
+    if (j.contains("stopSequences")) j.at("stopSequences").get_to(p.stop_sequences);
+    if (j.contains("metadata")) p.metadata = j.at("metadata");
+}
+
+void to_json(nlohmann::json& j, const CreateMessageResult& r) {
+    j = nlohmann::json{
+        {"role", r.role},
+        {"content", content_to_json(r.content)},
+        {"model", r.model},
+        {"stopReason", r.stop_reason}
+    };
+}
+
+void from_json(const nlohmann::json& j, CreateMessageResult& r) {
+    j.at("role").get_to(r.role);
+    r.content = content_from_json(j.at("content"));
+    j.at("model").get_to(r.model);
+    if (j.contains("stopReason")) j.at("stopReason").get_to(r.stop_reason);
+}
+
+void to_json(nlohmann::json& j, const ElicitRequestParams& p) {
+    j = nlohmann::json{{"message", p.message}};
+    if (p.requested_schema) j["requestedSchema"] = *p.requested_schema;
+}
+
+void from_json(const nlohmann::json& j, ElicitRequestParams& p) {
+    j.at("message").get_to(p.message);
+    if (j.contains("requestedSchema")) p.requested_schema = j.at("requestedSchema");
+}
+
+void to_json(nlohmann::json& j, const ElicitResult& r) {
+    j = nlohmann::json{{"action", r.action}};
+    if (r.content) j["content"] = *r.content;
+}
+
+void from_json(const nlohmann::json& j, ElicitResult& r) {
+    j.at("action").get_to(r.action);
+    if (j.contains("content")) r.content = j.at("content");
+}
+
+void to_json(nlohmann::json& j, const Root& r) {
+    j = nlohmann::json{{"uri", r.uri}};
+    if (r.name) j["name"] = *r.name;
+}
+
+void from_json(const nlohmann::json& j, Root& r) {
+    j.at("uri").get_to(r.uri);
+    if (j.contains("name")) j.at("name").get_to(r.name.emplace());
+}
+
+void to_json(nlohmann::json& j, const ListRootsResult& r) {
+    j = nlohmann::json{{"roots", r.roots}};
+}
+
+void from_json(const nlohmann::json& j, ListRootsResult& r) {
+    j.at("roots").get_to(r.roots);
 }
 
 } // namespace cppmcp

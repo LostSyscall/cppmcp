@@ -83,6 +83,98 @@ ParsedMessage parse_message(const nlohmann::json& raw) {
     }
 }
 
+ClientParsedMessage parse_message_client(const nlohmann::json& raw) {
+    try {
+        if (!raw.is_object() || !raw.contains("jsonrpc") || raw["jsonrpc"] != "2.0") {
+            return JsonRpcErrorResponse{
+                "2.0", NullId{},
+                JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Invalid or missing jsonrpc version"}
+            };
+        }
+
+        if (raw.contains("id")) {
+            if (raw.contains("method")) {
+                // Inbound Request from the server (sampling/elicitation/roots).
+                JsonRpcRequest req;
+                req.jsonrpc = "2.0";
+                from_json(raw["id"], req.id);
+                if (!raw["method"].is_string()) {
+                    return JsonRpcErrorResponse{
+                        "2.0", req.id,
+                        JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Method must be a string"}
+                    };
+                }
+                req.method = raw["method"].get<std::string>();
+                if (raw.contains("params") && !raw["params"].is_null()) {
+                    if (!raw["params"].is_object() && !raw["params"].is_array()) {
+                        return JsonRpcErrorResponse{
+                            "2.0", req.id,
+                            JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
+                        };
+                    }
+                    req.params = raw["params"];
+                }
+                return req;
+            }
+            // Response to one of our outbound requests.
+            RequestId id;
+            from_json(raw["id"], id);
+            if (raw.contains("result")) {
+                JsonRpcSuccessResponse resp;
+                resp.jsonrpc = "2.0";
+                resp.id = id;
+                resp.result = raw["result"];
+                return resp;
+            }
+            if (raw.contains("error") && raw["error"].is_object()) {
+                const auto& err = raw["error"];
+                JsonRpcErrorDetail detail;
+                detail.code = err.value("code", Protocol::INTERNAL_ERROR);
+                detail.message = err.value("message", std::string{"Unknown error"});
+                if (err.contains("data")) detail.data = err["data"];
+                return JsonRpcErrorResponse{"2.0", id, std::move(detail)};
+            }
+            return JsonRpcErrorResponse{
+                "2.0", id,
+                JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Response has neither result nor error"}
+            };
+        }
+
+        if (raw.contains("method")) {
+            // Notification (server-initiated push, progress, list_changed, cancelled).
+            if (!raw["method"].is_string()) {
+                return JsonRpcErrorResponse{
+                    "2.0", NullId{},
+                    JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Method must be a string"}
+                };
+            }
+            JsonRpcNotification notif;
+            notif.jsonrpc = "2.0";
+            notif.method = raw["method"].get<std::string>();
+            if (raw.contains("params") && !raw["params"].is_null()) {
+                if (!raw["params"].is_object() && !raw["params"].is_array()) {
+                    return JsonRpcErrorResponse{
+                        "2.0", NullId{},
+                        JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
+                    };
+                }
+                notif.params = raw["params"];
+            }
+            return notif;
+        }
+
+        return JsonRpcErrorResponse{
+            "2.0", NullId{},
+            JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Message must have method or be a valid request/response"}
+        };
+    } catch (const std::exception& e) {
+        return JsonRpcErrorResponse{
+            "2.0", NullId{},
+            JsonRpcErrorDetail{Protocol::PARSE_ERROR, "Failed to parse message: " + std::string(e.what())}
+        };
+    }
+}
+
 nlohmann::json make_success_response(const RequestId& id, nlohmann::json result) {
     return nlohmann::json{
         {"jsonrpc", "2.0"},

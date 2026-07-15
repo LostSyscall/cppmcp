@@ -212,6 +212,51 @@ struct ProgressNotificationParams {
     std::optional<double> total;
 };
 
+// --- Sampling (server -> client request) ---
+struct SamplingMessage {
+    std::string role;   // "user" or "assistant"
+    Content content;
+};
+
+struct CreateMessageRequestParams {
+    std::vector<SamplingMessage> messages;
+    std::optional<std::string> model;
+    std::optional<std::string> system_prompt;
+    std::optional<std::string> include_context;  // "none" | "thisServer" | "allServers"
+    std::optional<double> temperature;
+    std::optional<int64_t> max_tokens;
+    std::vector<std::string> stop_sequences;
+    std::optional<nlohmann::json> metadata;
+};
+
+struct CreateMessageResult {
+    std::string role;        // "user" or "assistant"
+    Content content;
+    std::string model;
+    std::string stop_reason; // "endTurn" | "stopSequence" | "maxTokens" | "other"
+};
+
+// --- Elicitation (server -> client request) ---
+struct ElicitRequestParams {
+    std::string message;
+    std::optional<nlohmann::json> requested_schema;
+};
+
+struct ElicitResult {
+    std::string action;  // "accept" | "decline" | "cancel"
+    std::optional<nlohmann::json> content;  // present only when action == "accept"
+};
+
+// --- Roots (server -> client request) ---
+struct Root {
+    std::string uri;
+    std::optional<std::string> name;
+};
+
+struct ListRootsResult {
+    std::vector<Root> roots;
+};
+
 // --- Serialization helpers ---
 nlohmann::json content_to_json(const Content& c);
 Content content_from_json(const nlohmann::json& j);
@@ -271,6 +316,11 @@ void to_json(nlohmann::json& j, const CompletionsCapability& c);
 void to_json(nlohmann::json& j, const ServerCapabilities& c);
 void from_json(const nlohmann::json& j, ServerCapabilities& c);
 
+void to_json(nlohmann::json& j, const SamplingCapability& c);
+void to_json(nlohmann::json& j, const ElicitationCapability& c);
+void to_json(nlohmann::json& j, const RootsCapability& c);
+void to_json(nlohmann::json& j, const ClientCapabilities& c);
+
 void to_json(nlohmann::json& j, const Implementation& impl);
 void from_json(const nlohmann::json& j, Implementation& impl);
 
@@ -281,5 +331,27 @@ void to_json(nlohmann::json& j, const EmptyResult&);
 
 void to_json(nlohmann::json& j, const Completion& c);
 void to_json(nlohmann::json& j, const CompleteResult& r);
+
+// Sampling / elicitation / roots (server -> client)
+void to_json(nlohmann::json& j, const SamplingMessage& m);
+void from_json(const nlohmann::json& j, SamplingMessage& m);
+
+void to_json(nlohmann::json& j, const CreateMessageRequestParams& p);
+void from_json(const nlohmann::json& j, CreateMessageRequestParams& p);
+
+void to_json(nlohmann::json& j, const CreateMessageResult& r);
+void from_json(const nlohmann::json& j, CreateMessageResult& r);
+
+void to_json(nlohmann::json& j, const ElicitRequestParams& p);
+void from_json(const nlohmann::json& j, ElicitRequestParams& p);
+
+void to_json(nlohmann::json& j, const ElicitResult& r);
+void from_json(const nlohmann::json& j, ElicitResult& r);
+
+void to_json(nlohmann::json& j, const Root& r);
+void from_json(const nlohmann::json& j, Root& r);
+
+void to_json(nlohmann::json& j, const ListRootsResult& r);
+void from_json(const nlohmann::json& j, ListRootsResult& r);
 
 } // namespace cppmcp

@@ -47,8 +47,18 @@ using JsonRpcResponse = std::variant<JsonRpcSuccessResponse, JsonRpcErrorRespons
 
 using ParsedMessage = std::variant<JsonRpcRequest, JsonRpcNotification, JsonRpcErrorResponse>;
 
-// Parse a raw JSON object into a classified JSON-RPC message
+// Client-side parse result: unlike the server variant, a response (has id, no
+// method) is classified as Success/Error rather than treated as an error.
+using ClientParsedMessage = std::variant<JsonRpcRequest,
+                                         JsonRpcNotification,
+                                         JsonRpcSuccessResponse,
+                                         JsonRpcErrorResponse>;
+
+// Parse a raw JSON object into a classified JSON-RPC message (server view).
 ParsedMessage parse_message(const nlohmann::json& raw);
+
+// Parse a raw JSON object into a classified JSON-RPC message (client view).
+ClientParsedMessage parse_message_client(const nlohmann::json& raw);
 
 // Construct success response
 nlohmann::json make_success_response(const RequestId& id, nlohmann::json result);
