@@ -481,3 +481,80 @@ TEST_F(StreamableHttpTest, PipelinedRequestsBothDispatched) {
     EXPECT_NE(all.find("\"id\":10"), std::string::npos);
     EXPECT_NE(all.find("\"id\":11"), std::string::npos);
 }
+
+// Concurrency stress: io threads (set_io_threads) + worker pool
+// (set_worker_threads) under concurrent clients. Verifies responses are correct
+// (no cross-talk / corruption) and the process does not crash — strands protect
+// parser state and explicit session routing holds under multi-threading.
+TEST(StreamableHttpMultiThreadTest, ConcurrentClientsNoCorruption) {
+    Implementation info{"mt_server", "1.0.0"};
+    ServerCapabilities caps;
+    caps.tools = ToolsCapability();
+    auto server = std::make_shared<McpServer>(info, caps);
+    server->set_io_threads(4);
+    server->set_worker_threads(4);
+
+    Tool t;
+    t.name = "slow_echo";
+    t.description = "Echoes after a short delay";
+    t.input_schema = nlohmann::json::parse(
+        "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}");
+    server->register_tool("slow_echo", t,
+        [](const nlohmann::json& args, RequestContext&) -> CallToolResult {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            CallToolResult r;
+            r.content.push_back(TextContent{"text", args["message"].get<std::string>()});
+            r.is_error = false;
+            return r;
+        });
+
+    HttpTransportConfig config;
+    config.mode = HttpTransportMode::StreamableHttp;
+    config.host = "127.0.0.1";
+    config.port = 0;
+    config.path = "/mcp";
+    auto transport = std::make_shared<HttpTransport>(config);
+    server->connect(transport);
+
+    ServerThread thread(*server);
+    thread.wait_until_ready();
+    int port = transport->get_port();
+
+    constexpr int kClients = 4;
+    constexpr int kPerClient = 4;
+    std::vector<std::thread> clients;
+    std::atomic<int> errors{0};
+
+    for (int i = 0; i < kClients; ++i) {
+        clients.emplace_back([&, i]() {
+            HttpClient c;
+            auto init = c.post_and_parse("127.0.0.1", port, "/mcp", make_initialize_request(1));
+            if (init.status != 200) { ++errors; return; }
+            std::string sid = init.headers.count("mcp-session-id") ? init.headers["mcp-session-id"] : "";
+            std::map<std::string, std::string> sh;
+            if (!sid.empty()) sh["mcp-session-id"] = sid;
+            c.post_and_parse("127.0.0.1", port, "/mcp", make_initialized_notification(), sh);
+
+            for (int j = 0; j < kPerClient; ++j) {
+                int id = i * 100 + j;
+                std::string msg = "c" + std::to_string(id);
+                auto resp = c.post_and_parse("127.0.0.1", port, "/mcp",
+                    make_tools_call_request(id, "slow_echo", nlohmann::json{{"message", msg}}), sh);
+                if (resp.status != 200) { ++errors; continue; }
+                try {
+                    auto body = nlohmann::json::parse(resp.body);
+                    if (body.value("id", -1) != id) { ++errors; continue; }
+                    if (body["result"]["content"][0]["text"] != msg) { ++errors; }
+                } catch (...) {
+                    ++errors;
+                }
+            }
+        });
+    }
+
+    for (auto& th : clients) {
+        if (th.joinable()) th.join();
+    }
+
+    EXPECT_EQ(errors.load(), 0);
+}
