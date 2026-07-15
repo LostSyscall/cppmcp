@@ -13,7 +13,7 @@
 
 namespace cppmcp {
 
-class StdioTransport : public ITransport {
+class StdioTransport : public std::enable_shared_from_this<StdioTransport>, public ITransport {
 public:
     StdioTransport();
     ~StdioTransport() override;
@@ -25,6 +25,9 @@ public:
     void send_message(const nlohmann::json& message) override;
     void set_message_handler(MessageCallback handler) override;
     void set_error_handler(ErrorCallback handler) override;
+    void set_disconnect_handler(DisconnectCallback handler) override {
+        disconnect_handler_ = std::move(handler);
+    }
     void set_io_context(asio::io_context* io_ctx) override;
 
 private:
@@ -43,10 +46,12 @@ private:
 #endif
 
     std::atomic<bool> running_{false};
+    size_t max_line_size = 4 * 1024 * 1024;
     std::mutex write_mutex_;
 
     MessageCallback message_handler_;
     ErrorCallback error_handler_;
+    DisconnectCallback disconnect_handler_;
 };
 
 } // namespace cppmcp

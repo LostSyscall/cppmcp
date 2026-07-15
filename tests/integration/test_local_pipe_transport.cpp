@@ -80,6 +80,17 @@ public:
 #endif
     }
 
+    // Write an arbitrary byte blob (e.g. several newline-delimited messages
+    // batched into one write) to exercise framing behavior.
+    void send_raw(const std::string& data) {
+        auto data_ptr = std::make_shared<std::string>(data);
+        asio::post(io_ctx_, [this, data_ptr]() {
+            bool was_empty = write_queue_.empty();
+            write_queue_.push_back(std::move(*data_ptr));
+            if (was_empty) start_write();
+        });
+    }
+
     // Wait for a response by id
     json read_response(int expected_id, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -341,3 +352,26 @@ TEST_F(LocalPipeTest, MultipleSequentialRequests) {
 
     client.close();
 }
+
+#ifdef _WIN32
+// Regression (#10): on Windows the named pipe is now byte-stream + line
+// framed. Two newline-delimited messages written in a single write must both
+// be parsed and answered (previously the whole chunk was treated as one JSON
+// and failed to parse).
+TEST_F(LocalPipeTest, BatchedMessagesInOneWrite) {
+    LocalPipeClient client(pipe_name_);
+    client.connect();
+
+    std::string batch = make_initialize_request(1).dump() + "\n" +
+                        make_ping_request(2).dump() + "\n";
+    client.send_raw(batch);
+
+    auto r1 = client.read_response(1);
+    EXPECT_EQ(r1["id"], 1);
+
+    auto r2 = client.read_response(2);
+    EXPECT_EQ(r2["id"], 2);  // present (error body is fine — we only check framing)
+
+    client.close();
+}
+#endif

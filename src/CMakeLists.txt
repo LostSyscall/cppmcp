@@ -6,6 +6,8 @@ add_library(cppmcp_lib
     stdio_transport.cpp
     http_transport.cpp
     local_pipe_transport.cpp
+    logging.cpp
+    request_executor.cpp
 )
 
 target_include_directories(cppmcp_lib PUBLIC

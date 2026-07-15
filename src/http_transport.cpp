@@ -3,13 +3,11 @@
 #include "cppmcp/protocol.hpp"
 #include "cppmcp/common.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <random>
 
 namespace cppmcp {
-
-// thread_local: each request thread gets its own response sender
-static thread_local ITransport::ResponseSender tl_response_sender;
 
 // --- HttpConnection ---
 HttpConnection::HttpConnection(asio::ip::tcp::socket s)
@@ -30,6 +28,9 @@ HttpConnection::HttpConnection(asio::ip::tcp::socket s)
 
     parser_settings.on_body = [](llhttp_t* parser, const char* at, size_t length) {
         auto* self = static_cast<HttpConnection*>(parser->data);
+        if (self->current_body.size() + length > self->max_body_size) {
+            return -1;  // oversize body -> llhttp error -> 400 (reject during streaming)
+        }
         self->current_body.append(at, length);
         return 0;
     };
@@ -67,18 +68,11 @@ HttpConnection::HttpConnection(asio::ip::tcp::socket s)
         return 0;
     };
 
-    parser_settings.on_message_complete = [](llhttp_t* parser) {
+    parser_settings.on_message_complete = [](llhttp_t* parser) -> int {
         auto* self = static_cast<HttpConnection*>(parser->data);
-        // Flush last header if pending
-        if (!self->current_header_field.empty()) {
-            std::string field = self->current_header_field;
-            for (auto& c : field) c = static_cast<char>(tolower(c));
-            self->headers[field] = self->current_header_value;
-            self->current_header_field.clear();
-            self->current_header_value.clear();
-        }
+        // Headers are already flushed in on_headers_complete.
         self->request_complete = true;
-        return 0;
+        return HPE_PAUSED;  // pause so pipelined requests dispatch one at a time
     };
 
     llhttp_init(&parser, HTTP_REQUEST, &parser_settings);
@@ -90,7 +84,7 @@ void HttpConnection::start_read_with_dispatch(HttpTransport* transport) {
     asio::async_read(socket, read_buf, asio::transfer_at_least(1),
         [this, self, transport](const asio::error_code& ec, std::size_t bytes_transferred) {
             if (ec) {
-                active = false;
+                on_error();
                 return;
             }
 
@@ -100,26 +94,42 @@ void HttpConnection::start_read_with_dispatch(HttpTransport* transport) {
             std::string data(begin, end);
             read_buf.consume(bytes_transferred);
 
-            llhttp_errno err = llhttp_execute(&parser, data.c_str(), data.size());
-            if (err == HPE_PAUSED_UPGRADE) {
-                llhttp_resume_after_upgrade(&parser);
-            } else if (err != HPE_OK) {
-                std::string resp = transport->build_http_response(400, "text/plain", "Bad request");
-                enqueue_write(resp);
-                active = false;
+            // llhttp pauses at each message boundary (on_message_complete
+            // returns HPE_PAUSED) so pipelined/coalesced requests are
+            // dispatched one at a time instead of clobbering each other's
+            // parsed state.
+            const char* base = data.data();
+            std::size_t total = data.size();
+            std::size_t offset = 0;
+            while (offset < total) {
+                llhttp_errno err = llhttp_execute(&parser, base + offset, total - offset);
+                if (err == HPE_OK) {
+                    break;  // consumed; request may still be incomplete (await more)
+                }
+                if (err == HPE_PAUSED_UPGRADE) {
+                    llhttp_resume_after_upgrade(&parser);
+                    continue;
+                }
+                if (err == HPE_PAUSED) {
+                    std::size_t parsed = static_cast<std::size_t>(llhttp_get_error_pos(&parser) - (base + offset));
+                    offset += parsed;
+                    if (request_complete && !current_method.empty()) {
+                        transport->handle_request(self);
+                    }
+                    llhttp_reset(&parser);
+                    current_url.clear();
+                    current_method.clear();
+                    current_body.clear();
+                    headers.clear();
+                    current_header_field.clear();
+                    current_header_value.clear();
+                    request_complete = false;
+                    llhttp_resume(&parser);
+                    continue;
+                }
+                enqueue_write(transport->build_http_response(400, "text/plain", "Bad request"));
+                on_error();
                 return;
-            }
-
-            if (request_complete && !current_method.empty()) {
-                transport->handle_request(self);
-                llhttp_reset(&parser);
-                current_url.clear();
-                current_method.clear();
-                current_body.clear();
-                headers.clear();
-                current_header_field.clear();
-                current_header_value.clear();
-                request_complete = false;
             }
 
             if (active) {
@@ -129,77 +139,41 @@ void HttpConnection::start_read_with_dispatch(HttpTransport* transport) {
 }
 
 void HttpConnection::enqueue_write(std::string data) {
-    bool was_empty;
-    {
-        std::lock_guard<std::mutex> lock(write_mutex);
-        was_empty = write_queue.empty();
-        write_queue.push_back(std::move(data));
-    }
-    if (was_empty) {
-        start_write();
+    if (write_queue_) {
+        write_queue_->enqueue(std::move(data));
     }
 }
 
-void HttpConnection::start_write() {
+void HttpConnection::init_write_queue(std::size_t max_queued_bytes, QueueOverflowPolicy policy) {
     auto self = shared_from_this();
-    auto data_ptr = std::make_shared<std::string>();
-    {
-        std::lock_guard<std::mutex> lock(write_mutex);
-        if (write_queue.empty() || !active) return;
-        *data_ptr = std::move(write_queue.front());
-        write_queue.pop_front();
+    write_queue_ = std::make_shared<AsyncWriteQueue>(
+        [self](std::shared_ptr<std::string> buffer, AsyncWriteQueue::WriteCompletion completion) {
+            asio::async_write(self->socket, asio::buffer(*buffer),
+                [buffer, completion](const asio::error_code& ec, std::size_t) {
+                    completion(ec);
+                });
+        },
+        [self](const asio::error_code& ec) {
+            (void)ec;
+            self->on_error();
+        },
+        max_queued_bytes, policy);
+}
+
+void HttpConnection::on_error() {
+    if (active.exchange(false)) {
+        if (on_disconnect) {
+            on_disconnect();
+        }
     }
-    asio::async_write(socket, asio::buffer(*data_ptr),
-        [this, self, data_ptr](const asio::error_code& ec, std::size_t) {
-            if (ec) {
-                active = false;
-                return;
-            }
-            {
-                std::lock_guard<std::mutex> lock(write_mutex);
-                if (!write_queue.empty() && active) {
-                    start_write();
-                }
-            }
-        });
 }
 
 // --- SseConnection ---
 void SseConnection::push(const std::string& data) {
-    std::string frame = "data: " + data + "\n\n";
-    bool was_empty;
-    {
-        std::lock_guard<std::mutex> lock(write_mutex);
-        was_empty = write_queue.empty();
-        write_queue.push_back(std::move(frame));
+    if (!active.load() || !conn || !conn->write_queue_) {
+        return;
     }
-    if (was_empty && active) {
-        start_write();
-    }
-}
-
-void SseConnection::start_write() {
-    auto self = shared_from_this();
-    auto data_ptr = std::make_shared<std::string>();
-    {
-        std::lock_guard<std::mutex> lock(write_mutex);
-        if (write_queue.empty() || !active) return;
-        *data_ptr = std::move(write_queue.front());
-        write_queue.pop_front();
-    }
-    asio::async_write(conn->socket, asio::buffer(*data_ptr),
-        [this, self, data_ptr](const asio::error_code& ec, std::size_t) {
-            if (ec) {
-                active = false;
-                return;
-            }
-            {
-                std::lock_guard<std::mutex> lock(write_mutex);
-                if (!write_queue.empty() && active) {
-                    start_write();
-                }
-            }
-        });
+    conn->write_queue_->enqueue("data: " + data + "\n\n");
 }
 
 // --- Utility ---
@@ -213,6 +187,26 @@ static std::string generate_session_id() {
         id += chars[gen() % (sizeof(chars) - 1)];
     }
     return id;
+}
+
+// Parse the host out of an Origin header ("scheme://host[:port][/path]") and
+// compare against loopback aliases / configured host. Anchored, so e.g.
+// "localhost.evil.com" or "https://evil.com/127.0.0.1" are NOT accepted.
+static bool is_origin_allowed(const std::string& origin, const std::string& config_host) {
+    std::string host = origin;
+    auto scheme_end = host.find("://");
+    if (scheme_end != std::string::npos) {
+        host = host.substr(scheme_end + 3);
+    }
+    auto path_start = host.find('/');
+    if (path_start != std::string::npos) {
+        host = host.substr(0, path_start);
+    }
+    auto colon = host.find(':');
+    if (colon != std::string::npos) {
+        host = host.substr(0, colon);
+    }
+    return host == "127.0.0.1" || host == "localhost" || host == "::1" || host == config_host;
 }
 
 std::string HttpTransport::status_text(int status) {
@@ -259,9 +253,10 @@ void HttpTransport::start() {
         if (error_handler_) error_handler_("HttpTransport: no io_context set");
         return;
     }
-
-    current_session_id_ = generate_session_id();
-    session_initialized_.store(true, std::memory_order_relaxed);
+    if (config_.port < 0 || config_.port > 65535) {
+        if (error_handler_) error_handler_("HttpTransport: invalid port " + std::to_string(config_.port));
+        return;
+    }
 
     // Create and open acceptor
     acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(*io_ctx_);
@@ -282,6 +277,9 @@ void HttpTransport::stop() {
         std::unique_lock<std::shared_mutex> lock(connections_mutex_);
         for (auto& conn : active_sse_connections_) {
             conn->active = false;
+            if (conn->conn && conn->conn->write_queue_) {
+                conn->conn->write_queue_->shutdown();
+            }
         }
         active_sse_connections_.clear();
     }
@@ -315,7 +313,28 @@ void HttpTransport::do_accept() {
                 return;
             }
 
+            // Connection cap: accept-then-close when at the limit.
+            if (config_.max_connections > 0 &&
+                active_connection_count_.load(std::memory_order_relaxed) >= config_.max_connections) {
+                asio::error_code ignore;
+                socket.close(ignore);
+                if (running_) {
+                    do_accept();
+                }
+                return;
+            }
+
+            asio::error_code no_delay_ec;
+            socket.set_option(asio::ip::tcp::no_delay(true), no_delay_ec);
             auto conn = std::make_shared<HttpConnection>(std::move(socket));
+            conn->max_body_size = config_.max_body_size;
+            conn->init_write_queue(config_.write_queue_max_bytes, config_.write_queue_overflow);
+            conn->on_disconnect = [this]() {
+                if (active_connection_count_.load(std::memory_order_relaxed) > 0) {
+                    --active_connection_count_;
+                }
+            };
+            ++active_connection_count_;
             conn->start_read_with_dispatch(this);
 
             if (running_) {
@@ -335,9 +354,7 @@ void HttpTransport::handle_request(std::shared_ptr<HttpConnection> conn) {
         if (it != conn->headers.end()) origin = it->second;
     }
     if (!origin.empty()) {
-        bool allowed = origin.find("127.0.0.1") != std::string::npos
-                    || origin.find("localhost") != std::string::npos;
-        if (!allowed) {
+        if (!is_origin_allowed(origin, config_.host)) {
             conn->enqueue_write(build_http_response(403, "text/plain", "Forbidden: Origin not allowed"));
             conn->active = false;
             return;
@@ -390,9 +407,7 @@ void HttpTransport::handle_post(std::shared_ptr<HttpConnection> conn) {
         if (it != conn->headers.end()) content_type = it->second;
     }
     if (content_type.find("application/json") == std::string::npos) {
-        std::vector<std::pair<std::string, std::string>> h;
-        if (session_initialized_.load()) h.emplace_back("mcp-session-id", current_session_id_);
-        conn->enqueue_write(build_http_response(400, "text/plain", "Content-Type must be application/json", h));
+        conn->enqueue_write(build_http_response(400, "text/plain", "Content-Type must be application/json"));
         return;
     }
 
@@ -401,83 +416,125 @@ void HttpTransport::handle_post(std::shared_ptr<HttpConnection> conn) {
         auto it = conn->headers.find("mcp-session-id");
         if (it != conn->headers.end()) req_session_id = it->second;
     }
-    if (!req_session_id.empty() && req_session_id != current_session_id_) {
-        conn->enqueue_write(build_http_response(404, "text/plain", "Session not found"));
-        return;
-    }
 
-    if (conn->current_body.size() > config_.max_body_size) {
-        conn->enqueue_write(build_http_response(400, "text/plain", "Request body too large"));
-        return;
-    }
-
+    nlohmann::json json_msg;
+    ParsedMessage parsed;
     try {
-        auto json_msg = nlohmann::json::parse(conn->current_body);
-        auto parsed = parse_message(json_msg);
-
-        if (auto* err_resp = std::get_if<JsonRpcErrorResponse>(&parsed)) {
-            auto j = make_error_response(err_resp->id, err_resp->error.code,
-                                         err_resp->error.message, err_resp->error.data);
-            std::vector<std::pair<std::string, std::string>> h;
-            if (session_initialized_.load()) h.emplace_back("mcp-session-id", current_session_id_);
-            conn->enqueue_write(build_http_response(200, "application/json", j.dump(), h));
-            return;
-        }
-
-        if (auto* notif = std::get_if<JsonRpcNotification>(&parsed)) {
-            if (message_handler_) message_handler_(json_msg);
-            std::vector<std::pair<std::string, std::string>> h;
-            if (session_initialized_.load()) h.emplace_back("mcp-session-id", current_session_id_);
-            conn->enqueue_write(build_http_response(202, "text/plain", "", h));
-            return;
-        }
-
-        // Request — use tl_response_sender for HTTP body routing
-        if (message_handler_) {
-            nlohmann::json response_json;
-            bool response_captured = false;
-
-            tl_response_sender = [&](const nlohmann::json& resp) {
-                if (!response_captured) {
-                    response_json = resp;
-                    response_captured = true;
-                } else {
-                    push_to_sse_connections(resp);
-                }
-            };
-
-            message_handler_(json_msg);
-            tl_response_sender = nullptr;
-
-            std::vector<std::pair<std::string, std::string>> h;
-            if (session_initialized_.load()) h.emplace_back("mcp-session-id", current_session_id_);
-
-            if (response_captured) {
-                conn->enqueue_write(build_http_response(200, "application/json", response_json.dump(), h));
-            } else {
-                conn->enqueue_write(build_http_response(500, "text/plain", "No response generated", h));
-            }
-        }
+        json_msg = nlohmann::json::parse(conn->current_body);
+        parsed = parse_message(json_msg);
     } catch (const nlohmann::json::parse_error& e) {
         auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());
         conn->enqueue_write(build_http_response(200, "application/json", error_resp.dump()));
+        return;
+    }
+
+    auto session_header = [](const std::string& sid) {
+        std::vector<std::pair<std::string, std::string>> h;
+        if (!sid.empty()) h.emplace_back("mcp-session-id", sid);
+        return h;
+    };
+
+    if (auto* err_resp = std::get_if<JsonRpcErrorResponse>(&parsed)) {
+        auto j = make_error_response(err_resp->id, err_resp->error.code,
+                                     err_resp->error.message, err_resp->error.data);
+        conn->enqueue_write(build_http_response(200, "application/json", j.dump(),
+                                                session_header(req_session_id)));
+        return;
+    }
+
+    std::string method;
+    if (auto* req = std::get_if<JsonRpcRequest>(&parsed)) {
+        method = req->method;
+    } else if (auto* notif = std::get_if<JsonRpcNotification>(&parsed)) {
+        method = notif->method;
+    }
+
+    const bool is_initialize = (method == Protocol::METHOD_INITIALIZE);
+
+    // Resolve or create the session this request belongs to.
+    std::shared_ptr<HttpSession> session;
+    std::string response_session_id;
+
+    if (is_initialize) {
+        if (!req_session_id.empty()) {
+            conn->enqueue_write(build_http_response(400, "text/plain", "Session already exists"));
+            return;
+        }
+        session = std::make_shared<HttpSession>();
+        session->session_id = generate_session_id();
+        session->initialized.store(false);
+        response_session_id = session->session_id;
+    } else {
+        session = find_session(req_session_id);
+        if (!session) {
+            conn->enqueue_write(build_http_response(404, "text/plain", "Session not found"));
+            return;
+        }
+        if (!session->initialized.load()) {
+            conn->enqueue_write(build_http_response(403, "text/plain", "Session not initialized"));
+            return;
+        }
+        response_session_id = session->session_id;
+    }
+
+    if (!message_handler_) {
+        conn->enqueue_write(build_http_response(500, "text/plain", "No handler configured"));
+        return;
+    }
+
+    // Run the handler with the session bound as the notification target. The
+    // response goes into the HTTP body; notifications/extra responses route to
+    // the session's SSE stream.
+    // The sink writes the HTTP frame on the FIRST response it receives (works
+    // for synchronous handlers and for handlers deferred to the worker pool);
+    // any additional emissions route to the session's SSE stream.
+    auto frame_written = std::make_shared<std::atomic<bool>>(false);
+    auto self = shared_from_this();
+    auto conn_ref = conn;
+    auto sid = response_session_id;
+    ITransport::ResponseSink sink = [self, conn_ref, sid, frame_written](const nlohmann::json& resp) {
+        bool expected = false;
+        if (frame_written->compare_exchange_strong(expected, true)) {
+            std::vector<std::pair<std::string, std::string>> h;
+            if (!sid.empty()) h.emplace_back("mcp-session-id", sid);
+            conn_ref->enqueue_write(self->build_http_response(200, "application/json", resp.dump(), h));
+        } else {
+            self->send_to_session(sid, resp);
+        }
+    };
+
+    try {
+        message_handler_(json_msg, sink, response_session_id);
+    } catch (...) {
+        // Never propagate out of the io loop.
+    }
+
+    // Commit a new session only after a successful initialize. initialize is
+    // never deferred, so the synchronous handler above has already run.
+    if (is_initialize) {
+        session->initialized.store(true);
+        std::unique_lock<std::shared_mutex> lock(sessions_mutex_);
+        sessions_[session->session_id] = session;
+    }
+
+    // Notifications get a 202 (no body). Request responses are written by the
+    // sink (synchronously now, or when a deferred handler completes later).
+    if (std::get_if<JsonRpcNotification>(&parsed)) {
+        std::vector<std::pair<std::string, std::string>> h;
+        if (!response_session_id.empty()) h.emplace_back("mcp-session-id", response_session_id);
+        conn->enqueue_write(build_http_response(202, "text/plain", "", h));
     }
 }
 
 // --- Streamable HTTP: GET SSE ---
 void HttpTransport::handle_get_sse(std::shared_ptr<HttpConnection> conn) {
-    if (!session_initialized_.load()) {
-        conn->enqueue_write(build_http_response(405, "text/plain", "Method Not Allowed - session not initialized"));
-        conn->active = false;
-        return;
-    }
-
     std::string req_session_id;
     {
         auto it = conn->headers.find("mcp-session-id");
         if (it != conn->headers.end()) req_session_id = it->second;
     }
-    if (!req_session_id.empty() && req_session_id != current_session_id_) {
+    auto session = find_session(req_session_id);
+    if (!session) {
         conn->enqueue_write(build_http_response(404, "text/plain", "Session not found"));
         conn->active = false;
         return;
@@ -494,18 +551,18 @@ void HttpTransport::handle_get_sse(std::shared_ptr<HttpConnection> conn) {
         return;
     }
 
-    // Create SSE connection
     auto sse_conn = std::make_shared<SseConnection>();
     sse_conn->conn = conn;
+    conn->on_disconnect = [this, sse_conn, session]() {
+        std::unique_lock<std::shared_mutex> lock(sessions_mutex_);
+        session->sse_connections.remove(sse_conn);
+    };
 
-    // Build SSE response headers
     std::string resp_headers = "HTTP/1.1 200 OK\r\n";
     resp_headers += "Content-Type: text/event-stream\r\n";
     resp_headers += "Cache-Control: no-cache\r\n";
     resp_headers += "Connection: keep-alive\r\n";
-    if (session_initialized_.load()) {
-        resp_headers += "mcp-session-id: " + current_session_id_ + "\r\n";
-    }
+    resp_headers += "mcp-session-id: " + session->session_id + "\r\n";
     std::string origin;
     {
         auto it = conn->headers.find("origin");
@@ -519,8 +576,8 @@ void HttpTransport::handle_get_sse(std::shared_ptr<HttpConnection> conn) {
     conn->enqueue_write(resp_headers + ": connected\n\n");
 
     {
-        std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-        active_sse_connections_.push_back(sse_conn);
+        std::unique_lock<std::shared_mutex> lock(sessions_mutex_);
+        session->sse_connections.push_back(sse_conn);
     }
 }
 
@@ -531,21 +588,20 @@ void HttpTransport::handle_delete(std::shared_ptr<HttpConnection> conn) {
         auto it = conn->headers.find("mcp-session-id");
         if (it != conn->headers.end()) req_session_id = it->second;
     }
-    if (!req_session_id.empty() && req_session_id != current_session_id_) {
-        conn->enqueue_write(build_http_response(404, "text/plain", "Session not found"));
-        return;
-    }
 
     {
-        std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-        for (auto& c : active_sse_connections_) {
-            c->active = false;
+        std::unique_lock<std::shared_mutex> lock(sessions_mutex_);
+        auto it = sessions_.find(req_session_id);
+        if (req_session_id.empty() || it == sessions_.end()) {
+            conn->enqueue_write(build_http_response(404, "text/plain", "Session not found"));
+            return;
         }
-        active_sse_connections_.clear();
+        for (auto& sc : it->second->sse_connections) {
+            sc->active = false;
+        }
+        it->second->sse_connections.clear();
+        sessions_.erase(it);  // session is re-creatable by a later initialize
     }
-
-    session_initialized_.store(false);
-    current_session_id_.clear();
 
     conn->enqueue_write(build_http_response(200, "text/plain", ""));
 }
@@ -554,6 +610,12 @@ void HttpTransport::handle_delete(std::shared_ptr<HttpConnection> conn) {
 void HttpTransport::handle_sse_connect(std::shared_ptr<HttpConnection> conn) {
     auto sse_conn = std::make_shared<SseConnection>();
     sse_conn->conn = conn;
+    conn->on_disconnect = [this, sse_conn]() {
+        unregister_sse_connection(sse_conn);
+        if (active_connection_count_.load(std::memory_order_relaxed) > 0) {
+            --active_connection_count_;
+        }
+    };
 
     std::string resp_headers = "HTTP/1.1 200 OK\r\n";
     resp_headers += "Content-Type: text/event-stream\r\n";
@@ -575,7 +637,9 @@ void HttpTransport::handle_sse_message(std::shared_ptr<HttpConnection> conn) {
     try {
         auto json_msg = nlohmann::json::parse(conn->current_body);
         if (message_handler_) {
-            message_handler_(json_msg);
+            message_handler_(json_msg, [this](const nlohmann::json& resp) {
+                push_to_sse_connections(resp);
+            }, "");
         }
         conn->enqueue_write(build_http_response(202, "text/plain", ""));
     } catch (const nlohmann::json::parse_error& e) {
@@ -583,20 +647,22 @@ void HttpTransport::handle_sse_message(std::shared_ptr<HttpConnection> conn) {
     }
 }
 
-// --- send_message ---
+// --- send_message (notifications only) ---
 void HttpTransport::send_message(const nlohmann::json& message) {
-    if (tl_response_sender) {
-        tl_response_sender(message);
+    if (config_.mode == HttpTransportMode::SSE) {
+        push_to_sse_connections(message);  // legacy flat list
         return;
     }
+    // StreamableHttp broadcast: no specific session context.
+    push_to_all_sessions(message);
+}
 
-    std::string data = message.dump();
-    std::shared_lock<std::shared_mutex> lock(connections_mutex_);
-    for (auto& conn : active_sse_connections_) {
-        if (conn->active.load()) {
-            conn->push(data);
-        }
+void HttpTransport::send_to_session(const std::string& session_id, const nlohmann::json& message) {
+    if (config_.mode == HttpTransportMode::SSE) {
+        push_to_sse_connections(message);
+        return;
     }
+    push_to_session_sse(session_id, message);
 }
 
 void HttpTransport::push_to_sse_connections(const nlohmann::json& message) {
@@ -609,6 +675,44 @@ void HttpTransport::push_to_sse_connections(const nlohmann::json& message) {
     }
 }
 
+std::shared_ptr<HttpSession> HttpTransport::find_session(const std::string& id) {
+    if (id.empty()) {
+        return nullptr;
+    }
+    std::shared_lock<std::shared_mutex> lock(sessions_mutex_);
+    auto it = sessions_.find(id);
+    if (it == sessions_.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
+void HttpTransport::push_to_session_sse(const std::string& id, const nlohmann::json& message) {
+    std::string data = message.dump();
+    std::shared_lock<std::shared_mutex> lock(sessions_mutex_);
+    auto it = sessions_.find(id);
+    if (it == sessions_.end()) {
+        return;
+    }
+    for (auto& sc : it->second->sse_connections) {
+        if (sc->active.load()) {
+            sc->push(data);
+        }
+    }
+}
+
+void HttpTransport::push_to_all_sessions(const nlohmann::json& message) {
+    std::string data = message.dump();
+    std::shared_lock<std::shared_mutex> lock(sessions_mutex_);
+    for (auto& kv : sessions_) {
+        for (auto& sc : kv.second->sse_connections) {
+            if (sc->active.load()) {
+                sc->push(data);
+            }
+        }
+    }
+}
+
 void HttpTransport::set_message_handler(MessageCallback handler) {
     message_handler_ = std::move(handler);
 }
@@ -617,8 +721,15 @@ void HttpTransport::set_error_handler(ErrorCallback handler) {
     error_handler_ = std::move(handler);
 }
 
-void HttpTransport::set_response_sender(ResponseSender sender) {
-    tl_response_sender = std::move(sender);
+void HttpTransport::unregister_sse_connection(std::shared_ptr<SseConnection> conn) {
+    if (!conn) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+    conn->active = false;
+    active_sse_connections_.erase(
+        std::remove(active_sse_connections_.begin(), active_sse_connections_.end(), conn),
+        active_sse_connections_.end());
 }
 
 } // namespace cppmcp

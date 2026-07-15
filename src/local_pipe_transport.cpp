@@ -2,7 +2,9 @@
 #include "cppmcp/jsonrpc.hpp"
 #include "cppmcp/protocol.hpp"
 #include "cppmcp/common.hpp"
+#include "cppmcp/logging.hpp"
 
+#include <algorithm>
 #include <iostream>
 
 #ifdef _WIN32
@@ -10,9 +12,6 @@
 #else
 #include <unistd.h>
 #endif
-
-// thread_local: response routing for local pipe connections
-static thread_local std::shared_ptr<cppmcp::PipeConnection> tl_responding_conn;
 
 namespace cppmcp {
 
@@ -26,78 +25,67 @@ PipeConnection::PipeConnection(asio::local::stream_protocol::socket s, int id)
 #endif
 
 void PipeConnection::start_read() {
+    auto self = shared_from_this();
 #ifdef _WIN32
-    asio::async_read(stream_handle, read_buf, asio::transfer_at_least(1),
-        [this](const asio::error_code& ec, std::size_t bytes_transferred) {
-            if (ec) {
-                active = false;
-                std::cerr << "[cppmcp] Client #" << connection_id << " disconnected" << std::endl;
-                return;
-            }
-
-            auto bufs = read_buf.data();
-            auto begin = asio::buffers_begin(bufs);
-            auto end = begin + bytes_transferred;
-            std::string data(begin, end);
-            read_buf.consume(bytes_transferred);
-
-            while (!data.empty() && (data.back() == '\n' || data.back() == '\r')) {
-                data.pop_back();
-            }
-
-            if (!data.empty()) {
-                handle_line(data);
-            }
-
-            if (active) {
-                start_read();
-            }
+    asio::async_read_until(stream_handle, read_buf, '\n',
+        [this, self](const asio::error_code& ec, std::size_t bytes_transferred) {
+            handle_read_completion(ec, bytes_transferred);
         });
 #else
     asio::async_read_until(socket, read_buf, '\n',
-        [this](const asio::error_code& ec, std::size_t bytes_transferred) {
-            if (ec) {
-                active = false;
-                std::cerr << "[cppmcp] Client #" << connection_id << " disconnected" << std::endl;
-                return;
-            }
-
-            std::string line;
-            line.reserve(bytes_transferred);
-            auto bufs = read_buf.data();
-            for (auto it = asio::buffers_begin(bufs); it != asio::buffers_begin(bufs) + bytes_transferred; ++it) {
-                line += *it;
-            }
-            read_buf.consume(bytes_transferred);
-
-            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
-                line.pop_back();
-            }
-
-            if (!line.empty()) {
-                handle_line(line);
-            }
-
-            if (active) {
-                start_read();
-            }
+        [this, self](const asio::error_code& ec, std::size_t bytes_transferred) {
+            handle_read_completion(ec, bytes_transferred);
         });
 #endif
 }
 
+void PipeConnection::handle_read_completion(const asio::error_code& ec, std::size_t bytes_transferred) {
+    if (ec) {
+        AsyncLogger::instance().log("[cppmcp] Client #" + std::to_string(connection_id) + " disconnected");
+        on_error();
+        return;
+    }
+
+    std::string line;
+    line.reserve(bytes_transferred);
+    auto bufs = read_buf.data();
+    for (auto it = asio::buffers_begin(bufs); it != asio::buffers_begin(bufs) + bytes_transferred; ++it) {
+        line += *it;
+    }
+    read_buf.consume(bytes_transferred);
+
+    if (line.size() > max_line_size) {
+        enqueue_write(make_error_response_null_id(Protocol::PARSE_ERROR, "Message too large").dump());
+        on_error();
+        return;
+    }
+
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+        line.pop_back();
+    }
+
+    if (!line.empty()) {
+        handle_line(line);
+    }
+
+    if (active) {
+        start_read();
+    }
+}
+
 void PipeConnection::handle_line(const std::string& line) {
+    auto self = shared_from_this();
     try {
         auto json_msg = nlohmann::json::parse(line);
-        tl_responding_conn = std::shared_ptr<PipeConnection>(this, [](PipeConnection*){});  // non-owning
         if (message_handler) {
-            message_handler(json_msg);
+            ITransport::ResponseSink sink = [self](const nlohmann::json& resp) {
+                self->enqueue_write(resp.dump());
+            };
+            message_handler(json_msg, sink, "");
         }
-        tl_responding_conn = nullptr;
     } catch (const nlohmann::json::parse_error& e) {
         auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());
-        tl_responding_conn = std::shared_ptr<PipeConnection>(this, [](PipeConnection*){});
         enqueue_write(error_resp.dump());
-        tl_responding_conn = nullptr;
         if (error_handler) {
             error_handler("JSON parse error: " + std::string(e.what()));
         }
@@ -109,43 +97,50 @@ void PipeConnection::handle_line(const std::string& line) {
 }
 
 void PipeConnection::enqueue_write(std::string data) {
+    if (!write_queue) {
+        return;
+    }
     data += "\n";
-
-    bool was_empty;
-    {
-        std::lock_guard<std::mutex> lock(write_mutex);
-        was_empty = write_queue.empty();
-        write_queue.push_back(std::move(data));
-    }
-    if (was_empty) {
-        start_write();
-    }
+    write_queue->enqueue(std::move(data));
 }
 
-void PipeConnection::start_write() {
-    auto data_ptr = std::make_shared<std::string>();
-    {
-        std::lock_guard<std::mutex> lock(write_mutex);
-        if (write_queue.empty() || !active) return;
-        *data_ptr = std::move(write_queue.front());
-        write_queue.pop_front();
-    }
-
+void PipeConnection::init_write_queue(std::size_t max_queued_bytes, QueueOverflowPolicy policy) {
+    auto self = shared_from_this();
 #ifdef _WIN32
-    asio::async_write(stream_handle, asio::buffer(*data_ptr),
-        [this, data_ptr](const asio::error_code& ec, std::size_t) {
-            if (ec) { active = false; return; }
-            std::lock_guard<std::mutex> lock(write_mutex);
-            if (!write_queue.empty() && active) start_write();
-        });
+    write_queue = std::make_shared<AsyncWriteQueue>(
+        [self](std::shared_ptr<std::string> buffer, AsyncWriteQueue::WriteCompletion completion) {
+            asio::async_write(self->stream_handle, asio::buffer(*buffer),
+                [buffer, completion](const asio::error_code& ec, std::size_t) {
+                    completion(ec);
+                });
+        },
+        [self](const asio::error_code& ec) {
+            (void)ec;
+            self->on_error();
+        },
+        max_queued_bytes, policy);
 #else
-    asio::async_write(socket, asio::buffer(*data_ptr),
-        [this, data_ptr](const asio::error_code& ec, std::size_t) {
-            if (ec) { active = false; return; }
-            std::lock_guard<std::mutex> lock(write_mutex);
-            if (!write_queue.empty() && active) start_write();
-        });
+    write_queue = std::make_shared<AsyncWriteQueue>(
+        [self](std::shared_ptr<std::string> buffer, AsyncWriteQueue::WriteCompletion completion) {
+            asio::async_write(self->socket, asio::buffer(*buffer),
+                [buffer, completion](const asio::error_code& ec, std::size_t) {
+                    completion(ec);
+                });
+        },
+        [self](const asio::error_code& ec) {
+            (void)ec;
+            self->on_error();
+        },
+        max_queued_bytes, policy);
 #endif
+}
+
+void PipeConnection::on_error() {
+    if (active.exchange(false)) {
+        if (on_disconnect) {
+            on_disconnect();
+        }
+    }
 }
 
 // --- LocalPipeTransport ---
@@ -162,7 +157,7 @@ void LocalPipeTransport::set_io_context(asio::io_context* io_ctx) {
 
 std::string LocalPipeTransport::resolve_pipe_path() const {
 #ifdef _WIN32
-    return std::string("\\\\.\\pipe\\") + config_.pipe_name;
+    return R"(\\.\pipe\)" + config_.pipe_name;
 #else
     return std::string("/tmp/") + config_.pipe_name + ".sock";
 #endif
@@ -191,7 +186,7 @@ void LocalPipeTransport::win32_accept_loop() {
         HANDLE h = CreateNamedPipeA(
             path.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             config_.mode == PipeMode::SingleClient ? 1 : config_.max_instances,
             static_cast<DWORD>(config_.buffer_size),
             static_cast<DWORD>(config_.buffer_size),
@@ -272,13 +267,19 @@ void LocalPipeTransport::win32_accept_loop() {
                 return;
             }
 
+            conn->max_line_size = config_.max_line_size;
+            conn->init_write_queue(config_.write_queue_max_bytes, config_.write_queue_overflow);
+            conn->on_disconnect = [this, conn]() {
+                unregister_connection(conn);
+            };
+
             {
                 std::unique_lock<std::shared_mutex> lock(connections_mutex_);
                 active_connections_.push_back(conn);
             }
 
             conn->start_read();
-            std::cerr << "[cppmcp] Client #" << conn_id << " connected on pipe" << std::endl;
+            AsyncLogger::instance().log("[cppmcp] Client #" + std::to_string(conn_id) + " connected on pipe");
         });
 
         if (config_.mode == PipeMode::SingleClient) {
@@ -296,6 +297,9 @@ void LocalPipeTransport::stop() {
         std::unique_lock<std::shared_mutex> lock(connections_mutex_);
         for (auto& conn : active_connections_) {
             conn->active = false;
+            if (conn->write_queue) {
+                conn->write_queue->shutdown();
+            }
             asio::error_code ec;
             conn->stream_handle.close(ec);
         }
@@ -355,6 +359,11 @@ void LocalPipeTransport::do_accept() {
             conn->active = true;
             conn->message_handler = message_handler_;
             conn->error_handler = error_handler_;
+            conn->max_line_size = config_.max_line_size;
+            conn->init_write_queue(config_.write_queue_max_bytes, config_.write_queue_overflow);
+            conn->on_disconnect = [this, conn]() {
+                unregister_connection(conn);
+            };
 
             {
                 std::unique_lock<std::shared_mutex> lock(connections_mutex_);
@@ -362,7 +371,7 @@ void LocalPipeTransport::do_accept() {
             }
 
             conn->start_read();
-            std::cerr << "[cppmcp] Client #" << conn_id << " connected" << std::endl;
+            AsyncLogger::instance().log("[cppmcp] Client #" + std::to_string(conn_id) + " connected");
 
             if (config_.mode == PipeMode::SingleClient) return;
 
@@ -378,6 +387,9 @@ void LocalPipeTransport::stop() {
         std::unique_lock<std::shared_mutex> lock(connections_mutex_);
         for (auto& conn : active_connections_) {
             conn->active = false;
+            if (conn->write_queue) {
+                conn->write_queue->shutdown();
+            }
             asio::error_code ec;
             conn->socket.close(ec);
         }
@@ -400,12 +412,6 @@ bool LocalPipeTransport::is_running() const {
 
 void LocalPipeTransport::send_message(const nlohmann::json& message) {
     std::string data = message.dump();
-
-    if (tl_responding_conn && tl_responding_conn->active.load()) {
-        tl_responding_conn->enqueue_write(data);
-        return;
-    }
-
     std::shared_lock<std::shared_mutex> lock(connections_mutex_);
     for (auto& conn : active_connections_) {
         if (conn->active.load()) {
@@ -422,8 +428,15 @@ void LocalPipeTransport::set_error_handler(ErrorCallback handler) {
     error_handler_ = std::move(handler);
 }
 
-void LocalPipeTransport::set_response_sender(ResponseSender sender) {
-    // No-op: tl_responding_conn handles response routing
+void LocalPipeTransport::unregister_connection(std::shared_ptr<PipeConnection> conn) {
+    if (!conn) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+    conn->active = false;
+    active_connections_.erase(
+        std::remove(active_connections_.begin(), active_connections_.end(), conn),
+        active_connections_.end());
 }
 
 } // namespace cppmcp

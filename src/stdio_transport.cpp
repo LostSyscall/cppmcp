@@ -22,7 +22,10 @@ void StdioTransport::start() {
 #ifdef _WIN32
     // Windows console stdin doesn't support overlapped I/O.
     // Use a thin reader thread that posts each line into the asio event loop.
-    win32_reader_thread_ = std::thread(&StdioTransport::win32_read_loop, this);
+    auto self = shared_from_this();
+    win32_reader_thread_ = std::thread([self]() {
+        self->win32_read_loop();
+    });
 #else
     // Unix: use asio async read on stdin fd
     if (!io_ctx_) {
@@ -39,8 +42,12 @@ void StdioTransport::stop() {
     running_ = false;
 
 #ifdef _WIN32
+    // The reader thread blocks in std::getline on the console/pipe handle,
+    // which Ctrl+C does not interrupt. Joining would deadlock, so detach it;
+    // it exits on its own when stdin reaches EOF, or is terminated with the
+    // process on exit.
     if (win32_reader_thread_.joinable()) {
-        win32_reader_thread_.join();
+        win32_reader_thread_.detach();
     }
 #else
     if (stdin_desc_ && stdin_desc_->is_open()) {
@@ -81,22 +88,29 @@ void StdioTransport::set_error_handler(ErrorCallback handler) {
 #ifdef _WIN32
 
 void StdioTransport::win32_read_loop() {
+    auto self = shared_from_this();
     std::string line;
     while (running_ && std::getline(std::cin, line)) {
         if (line.empty()) continue;
+        if (line.size() > max_line_size) {
+            if (error_handler_) error_handler_("Message too large, discarded");
+            continue;
+        }
         // Post into asio event loop for thread-safe handler invocation
         std::string captured_line = line;
-        asio::post(*io_ctx_, [this, captured_line]() {
-            handle_line(captured_line);
+        asio::post(*io_ctx_, [self, captured_line]() {
+            self->handle_line(captured_line);
         });
     }
     running_ = false;
-    // Signal the io_context that stdin is done (EOF)
-    asio::post(*io_ctx_, [this]() {
-        if (!running_) {
-            // io_context may be blocked on work_guard — no more work to do
-        }
-    });
+    // stdin reached EOF: tell the server to shut down.
+    if (io_ctx_ && disconnect_handler_) {
+        asio::post(*io_ctx_, [self]() {
+            if (self->disconnect_handler_) {
+                self->disconnect_handler_();
+            }
+        });
+    }
 }
 
 #else
@@ -111,6 +125,9 @@ void StdioTransport::do_read() {
 void StdioTransport::on_read(const asio::error_code& ec, std::size_t bytes_transferred) {
     if (ec) {
         running_ = false;
+        if (disconnect_handler_) {
+            disconnect_handler_();  // stdin closed/errored -> shut down
+        }
         return;
     }
 
@@ -122,6 +139,12 @@ void StdioTransport::on_read(const asio::error_code& ec, std::size_t bytes_trans
         line += *it;
     }
     read_buf_.consume(bytes_transferred);
+
+    if (line.size() > max_line_size) {
+        if (error_handler_) error_handler_("Message too large, discarded");
+        if (running_) do_read();
+        return;
+    }
 
     // Strip trailing newline
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
@@ -144,7 +167,9 @@ void StdioTransport::handle_line(const std::string& line) {
     try {
         auto json_msg = nlohmann::json::parse(line);
         if (message_handler_) {
-            message_handler_(json_msg);
+            message_handler_(json_msg, [this](const nlohmann::json& resp) {
+                send_message(resp);
+            }, "");
         }
     } catch (const nlohmann::json::parse_error& e) {
         auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());

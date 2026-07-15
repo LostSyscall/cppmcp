@@ -26,9 +26,6 @@ public:
     void set_error_handler(ErrorCallback handler) override {
         error_handler_ = std::move(handler);
     }
-    void set_response_sender(ResponseSender sender) override {
-        response_sender_ = std::move(sender);
-    }
     void set_io_context(asio::io_context*) override {}
 
     std::string get_output() {
@@ -37,8 +34,15 @@ public:
     }
 
     MessageCallback& handler() { return message_handler_; }
-    ResponseSender& response_sender() { return response_sender_; }
     ErrorCallback& error_handler() { return error_handler_; }
+
+    void deliver(const json& msg) {
+        if (message_handler_) {
+            message_handler_(msg, [this](const json& resp) {
+                send_message(resp);
+            }, "");
+        }
+    }
 
 private:
     std::stringstream output_;
@@ -46,13 +50,12 @@ private:
     std::mutex write_mutex_;
     MessageCallback message_handler_;
     ErrorCallback error_handler_;
-    ResponseSender response_sender_;
 };
 
 static std::shared_ptr<TestTransport> init_server(McpServer& server) {
     auto transport = std::make_shared<TestTransport>();
     server.connect(transport);
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"},
         {"params", {
             {"protocolVersion", "2025-03-26"},
@@ -60,7 +63,7 @@ static std::shared_ptr<TestTransport> init_server(McpServer& server) {
             {"clientInfo", json::object({{"name", "test"}, {"version", "1.0"}})}
         }}
     });
-    transport->handler()(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+    transport->deliver(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
     return transport;
 }
 
@@ -102,7 +105,7 @@ TEST(IntegrationTest, HandleResourcesList) {
 
     auto transport = init_server(server);
 
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 2}, {"method", "resources/list"}
     });
 
@@ -137,7 +140,7 @@ TEST(IntegrationTest, HandleResourcesRead) {
 
     auto transport = init_server(server);
 
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 3}, {"method", "resources/read"},
         {"params", json::object({{"uri", "test://doc"}})}
     });
@@ -157,7 +160,7 @@ TEST(IntegrationTest, ResourceNotFound) {
 
     auto transport = init_server(server);
 
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 4}, {"method", "resources/read"},
         {"params", json::object({{"uri", "test://nonexistent"}})}
     });
@@ -188,7 +191,7 @@ TEST(IntegrationTest, HandlePromptsList) {
 
     auto transport = init_server(server);
 
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 5}, {"method", "prompts/list"}
     });
 
@@ -223,7 +226,7 @@ TEST(IntegrationTest, HandlePromptsGet) {
 
     auto transport = init_server(server);
 
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 6}, {"method", "prompts/get"},
         {"params", json::object({{"name", "greet"}, {"arguments", json::object({{"name", "Alice"}})}})}
     });
@@ -243,7 +246,7 @@ TEST(IntegrationTest, PromptNotFound) {
 
     auto transport = init_server(server);
 
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 7}, {"method", "prompts/get"},
         {"params", json::object({{"name", "nonexistent"}})}
     });
@@ -263,7 +266,7 @@ TEST(IntegrationTest, NotificationSending) {
     // send_notification checks server.running_, not transport.is_running()
     // Manually set server state for testing
     server.connect(transport);
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"},
         {"params", {
             {"protocolVersion", "2025-03-26"},
@@ -271,7 +274,7 @@ TEST(IntegrationTest, NotificationSending) {
             {"clientInfo", json::object({{"name", "test"}, {"version", "1.0"}})}
         }}
     });
-    transport->handler()(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+    transport->deliver(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
 
     // Use a direct send: notifications go through send_message regardless of running_
     // For unit testing, we send the notification directly via transport
@@ -303,7 +306,7 @@ TEST(IntegrationTest, ResponseDeliveredViaSendMessage) {
     auto transport = std::make_shared<TestTransport>();
     server.connect(transport);
 
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"},
         {"params", {
             {"protocolVersion", "2025-03-26"},

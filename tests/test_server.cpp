@@ -28,14 +28,22 @@ public:
     void set_error_handler(ErrorCallback handler) override {
         error_handler_ = std::move(handler);
     }
-    void set_response_sender(ResponseSender sender) override {
-        response_sender_ = std::move(sender);
-    }
     void set_io_context(asio::io_context*) override {}
 
     std::string get_output() { return output_.str(); }
 
     MessageCallback& handler() { return message_handler_; }
+
+    // Deliver a message to the server the way a real transport would: any
+    // response the server produces is routed back through send_message (which
+    // appends to the captured output).
+    void deliver(const json& msg) {
+        if (message_handler_) {
+            message_handler_(msg, [this](const json& resp) {
+                send_message(resp);
+            }, "");
+        }
+    }
 
 private:
     std::stringstream output_;
@@ -43,7 +51,6 @@ private:
     std::mutex write_mutex_;
     MessageCallback message_handler_;
     ErrorCallback error_handler_;
-    ResponseSender response_sender_;
 };
 
 TEST(ServerTest, HandleInitialize) {
@@ -68,7 +75,7 @@ TEST(ServerTest, HandleInitialize) {
     server.connect(transport);
 
     // Simulate incoming message via transport
-    transport->handler()(init_request);
+    transport->deliver(init_request);
 
     std::string output = transport->get_output();
     EXPECT_FALSE(output.empty());
@@ -88,7 +95,7 @@ TEST(ServerTest, HandlePing) {
     server.connect(transport);
 
     // First initialize
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"},
         {"id", 1},
         {"method", "initialize"},
@@ -100,7 +107,7 @@ TEST(ServerTest, HandlePing) {
     });
 
     // Send initialized notification
-    transport->handler()(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+    transport->deliver(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
 
     // Now ping
     json ping_request = {
@@ -108,7 +115,7 @@ TEST(ServerTest, HandlePing) {
         {"id", 2},
         {"method", "ping"}
     };
-    transport->handler()(ping_request);
+    transport->deliver(ping_request);
 
     // Find the ping response by id
     std::string output = transport->get_output();
@@ -153,7 +160,7 @@ TEST(ServerTest, HandleToolsList) {
     server.connect(transport);
 
     // Initialize first
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"},
         {"id", 1},
         {"method", "initialize"},
@@ -163,7 +170,7 @@ TEST(ServerTest, HandleToolsList) {
             {"clientInfo", {"name", "test", "version", "1.0"}}
         }}
     });
-    transport->handler()(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+    transport->deliver(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
 
     json list_request = {
         {"jsonrpc", "2.0"},
@@ -171,7 +178,7 @@ TEST(ServerTest, HandleToolsList) {
         {"method", "tools/list"}
     };
 
-    transport->handler()(list_request);
+    transport->deliver(list_request);
 
     std::string output = transport->get_output();
     // Find tools/list response
@@ -211,7 +218,7 @@ TEST(ServerTest, HandleToolsCall) {
     server.connect(transport);
 
     // Initialize first
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"},
         {"id", 1},
         {"method", "initialize"},
@@ -221,7 +228,7 @@ TEST(ServerTest, HandleToolsCall) {
             {"clientInfo", {"name", "test", "version", "1.0"}}
         }}
     });
-    transport->handler()(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+    transport->deliver(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
 
     json call_request = {
         {"jsonrpc", "2.0"},
@@ -233,7 +240,7 @@ TEST(ServerTest, HandleToolsCall) {
         })}
     };
 
-    transport->handler()(call_request);
+    transport->deliver(call_request);
 
     std::string output = transport->get_output();
     std::istringstream iss(output);
@@ -265,7 +272,7 @@ TEST(ServerTest, RejectRequestBeforeInit) {
         {"method", "tools/list"}
     };
 
-    transport->handler()(list_request);
+    transport->deliver(list_request);
 
     std::string output = transport->get_output();
     json response = json::parse(output.substr(0, output.find('\n')));
@@ -280,7 +287,7 @@ TEST(ServerTest, MethodNotFound) {
     server.connect(transport);
 
     // Initialize first
-    transport->handler()(json{
+    transport->deliver(json{
         {"jsonrpc", "2.0"},
         {"id", 1},
         {"method", "initialize"},
@@ -290,7 +297,7 @@ TEST(ServerTest, MethodNotFound) {
             {"clientInfo", {"name", "test", "version", "1.0"}}
         }}
     });
-    transport->handler()(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
+    transport->deliver(json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
 
     json unknown_request = {
         {"jsonrpc", "2.0"},
@@ -298,7 +305,7 @@ TEST(ServerTest, MethodNotFound) {
         {"method", "unknown/method"}
     };
 
-    transport->handler()(unknown_request);
+    transport->deliver(unknown_request);
 
     std::string output = transport->get_output();
     std::istringstream iss(output);

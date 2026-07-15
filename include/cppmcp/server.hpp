@@ -18,6 +18,8 @@
 #include "context.hpp"
 #include "jsonrpc.hpp"
 #include "protocol.hpp"
+#include "request_executor.hpp"
+#include "transport.hpp"
 #include "types.hpp"
 
 namespace cppmcp {
@@ -40,6 +42,15 @@ using CompletionHandler = std::function<CompleteResult(const CompletionReference
 
 using InitializeHandler = std::function<InitializeResult(const nlohmann::json& params)>;
 using LoggingLevelHandler = std::function<void(const std::string& level)>;
+
+// Cached serialized results of the list handlers. Populated lazily after run()
+// (frozen registries) and invalidated by invalidate_list_cache() / list_changed.
+struct ListCache {
+    std::optional<nlohmann::json> tools_list_result;
+    std::optional<nlohmann::json> resources_list_result;
+    std::optional<nlohmann::json> resource_templates_list_result;
+    std::optional<nlohmann::json> prompts_list_result;
+};
 
 class McpServer {
 public:
@@ -68,42 +79,54 @@ public:
     void stop();
     bool is_running() const { return running_.load(); }
 
+    // Configure a worker thread pool (call before run()). With N>0, slow
+    // tools/call, resources/read and prompts/get handlers run on the pool so
+    // they don't block the transport's io loop. 0 = synchronous (default).
+    void set_worker_threads(std::size_t n);
+
+    // Invalidate cached list-handler results (call after mutating the
+    // underlying tool/resource/prompt sets).
+    void invalidate_list_cache();
+
     // --- Notification Sending ---
-    void send_notification(const std::string& method, nlohmann::json params = {});
+    void send_notification(const std::string& method, nlohmann::json params = {}, const std::string& session_id = "");
     void notify_tools_list_changed();
     void notify_resources_list_changed();
     void notify_resources_updated(const std::string& uri);
     void notify_prompts_list_changed();
     void notify_progress(const RequestId& progress_token, double progress,
-                         std::optional<double> total = std::nullopt);
+                         std::optional<double> total = std::nullopt,
+                         const std::string& session_id = "");
     void notify_logging(const std::string& level, const std::string& data,
-                        std::optional<std::string> logger = std::nullopt);
+                        std::optional<std::string> logger = std::nullopt,
+                        const std::string& session_id = "");
 
     const Implementation& server_info() const { return server_info_; }
     const ServerCapabilities& capabilities() const { return capabilities_; }
 
 private:
     // Message processing
-    void on_message(const nlohmann::json& message);
-    nlohmann::json process_request(const JsonRpcRequest& req);
+    void on_message(const nlohmann::json& message, ITransport::ResponseSink respond, const std::string& session_id);
+    nlohmann::json process_request(const JsonRpcRequest& req, const std::string& session_id);
     void process_notification(const JsonRpcNotification& notif);
 
     // Method dispatch
     nlohmann::json dispatch_method(const std::string& method, const RequestId& id,
-                                   const std::optional<nlohmann::json>& params);
+                                   const std::optional<nlohmann::json>& params,
+                                   const std::string& session_id);
 
     // Specific method handlers
     nlohmann::json handle_initialize(const RequestId& id, const nlohmann::json& params);
     nlohmann::json handle_ping(const RequestId& id);
     nlohmann::json handle_tools_list(const RequestId& id);
-    nlohmann::json handle_tools_call(const RequestId& id, const nlohmann::json& params);
+    nlohmann::json handle_tools_call(const RequestId& id, const nlohmann::json& params, const std::string& session_id);
     nlohmann::json handle_resources_list(const RequestId& id);
-    nlohmann::json handle_resources_read(const RequestId& id, const nlohmann::json& params);
+    nlohmann::json handle_resources_read(const RequestId& id, const nlohmann::json& params, const std::string& session_id);
     nlohmann::json handle_resources_subscribe(const RequestId& id, const nlohmann::json& params);
     nlohmann::json handle_resources_unsubscribe(const RequestId& id, const nlohmann::json& params);
     nlohmann::json handle_resources_templates_list(const RequestId& id);
     nlohmann::json handle_prompts_list(const RequestId& id);
-    nlohmann::json handle_prompts_get(const RequestId& id, const nlohmann::json& params);
+    nlohmann::json handle_prompts_get(const RequestId& id, const nlohmann::json& params, const std::string& session_id);
     nlohmann::json handle_completion_complete(const RequestId& id, const nlohmann::json& params);
     nlohmann::json handle_logging_set_level(const RequestId& id, const nlohmann::json& params);
 
@@ -115,10 +138,16 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};
     std::atomic<bool> frozen_{false};
+    std::atomic<bool> stopping_{false};
 
     asio::io_context io_ctx_;
     asio::executor_work_guard<asio::io_context::executor_type> work_guard_;
     asio::signal_set signals_;
+    std::unique_ptr<RequestExecutor> executor_;
+    std::size_t configured_workers_ = 0;
+    ListCache list_cache_;
+    mutable std::mutex list_cache_mutex_;
+    std::atomic<bool> list_cache_enabled_{true};
 
     // Handler registries (mutable pre-runtime, frozen at run() time)
     std::map<std::string, std::pair<Tool, ToolHandler>> tool_handlers_;

@@ -287,3 +287,197 @@ TEST_F(StreamableHttpTest, DeleteSession) {
         std::map<std::string, std::string>{{"mcp-session-id", session_id}});
     EXPECT_EQ(del_resp.status, 200);
 }
+
+// Regression (#16): after DELETE, a new client must be able to initialize a
+// fresh session (previously the session was permanently broken until restart).
+TEST_F(StreamableHttpTest, DeleteSessionIsRecreatable) {
+    HttpClient client;
+
+    auto init1 = client.post_and_parse(host_, port_, "/mcp", make_initialize_request(1));
+    ASSERT_EQ(init1.status, 200);
+    std::string sid1 = init1.headers["mcp-session-id"];
+    ASSERT_FALSE(sid1.empty());
+
+    auto del = client.delete_and_parse(host_, port_, "/mcp",
+        std::map<std::string, std::string>{{"mcp-session-id", sid1}});
+    EXPECT_EQ(del.status, 200);
+
+    auto init2 = client.post_and_parse(host_, port_, "/mcp", make_initialize_request(2));
+    ASSERT_EQ(init2.status, 200);
+    ASSERT_TRUE(init2.headers.count("mcp-session-id"));
+    std::string sid2 = init2.headers["mcp-session-id"];
+    EXPECT_FALSE(sid2.empty());
+    EXPECT_NE(sid1, sid2);
+}
+
+// Regression (#5): a tool that emits a progress notification before returning
+// must NOT have that notification hijack the HTTP response body. The body has
+// to carry the CallToolResult; the notification routes to the SSE stream.
+TEST(StreamableHttpProgressTest, ProgressDoesNotHijackBody) {
+    Implementation info{"progress_server", "1.0.0"};
+    ServerCapabilities caps;
+    caps.tools = ToolsCapability();
+    auto server = std::make_shared<McpServer>(info, caps);
+
+    Tool t;
+    t.name = "with_progress";
+    t.description = "Reports progress then returns";
+    t.input_schema = nlohmann::json::parse("{\"type\":\"object\"}");
+    server->register_tool("with_progress", t,
+        [](const nlohmann::json& /*args*/, RequestContext& ctx) -> CallToolResult {
+            ctx.report_progress(0.5);
+            CallToolResult r;
+            r.content.push_back(TextContent{"text", "final-result"});
+            r.is_error = false;
+            return r;
+        });
+
+    HttpTransportConfig config;
+    config.mode = HttpTransportMode::StreamableHttp;
+    config.host = "127.0.0.1";
+    config.port = 0;
+    config.path = "/mcp";
+    auto transport = std::make_shared<HttpTransport>(config);
+    server->connect(transport);
+
+    ServerThread thread(*server);
+    thread.wait_until_ready();
+    int port = transport->get_port();
+
+    HttpClient client;
+    auto init = client.post_and_parse("127.0.0.1", port, "/mcp", make_initialize_request(1));
+    ASSERT_EQ(init.status, 200);
+    std::map<std::string, std::string> sh;
+    if (init.headers.count("mcp-session-id")) {
+        sh["mcp-session-id"] = init.headers["mcp-session-id"];
+    }
+    client.post_and_parse("127.0.0.1", port, "/mcp", make_initialized_notification(), sh);
+
+    auto resp = client.post_and_parse("127.0.0.1", port, "/mcp",
+        make_tools_call_request(2, "with_progress", nlohmann::json::object()), sh);
+    ASSERT_EQ(resp.status, 200);
+
+    nlohmann::json body = nlohmann::json::parse(resp.body);
+    EXPECT_EQ(body["id"], 2);
+    EXPECT_TRUE(body.contains("result"));
+    EXPECT_FALSE(body.contains("method"));  // must not be a notification
+    EXPECT_EQ(body["result"]["content"][0]["text"], "final-result");
+}
+
+// Regression (#6/#7): concurrent sessions are isolated; deleting one session
+// must not affect another.
+TEST_F(StreamableHttpTest, MultipleSessionsAreIndependent) {
+    HttpClient a, b;
+    auto ia = a.post_and_parse(host_, port_, "/mcp", make_initialize_request(1));
+    auto ib = b.post_and_parse(host_, port_, "/mcp", make_initialize_request(2));
+    ASSERT_EQ(ia.status, 200);
+    ASSERT_EQ(ib.status, 200);
+    std::string sida = ia.headers["mcp-session-id"];
+    std::string sidb = ib.headers["mcp-session-id"];
+    EXPECT_NE(sida, sidb);
+
+    a.post_and_parse(host_, port_, "/mcp", make_initialized_notification(),
+                     {{"mcp-session-id", sida}});
+    b.post_and_parse(host_, port_, "/mcp", make_initialized_notification(),
+                     {{"mcp-session-id", sidb}});
+
+    // A deletes its own session.
+    auto del = a.delete_and_parse(host_, port_, "/mcp", {{"mcp-session-id", sida}});
+    EXPECT_EQ(del.status, 200);
+
+    // B is unaffected and still works.
+    auto pb = b.post_and_parse(host_, port_, "/mcp", make_ping_request(3),
+                               {{"mcp-session-id", sidb}});
+    EXPECT_EQ(pb.status, 200);
+
+    // A's session is gone.
+    auto pa = a.post_and_parse(host_, port_, "/mcp", make_ping_request(4),
+                               {{"mcp-session-id", sida}});
+    EXPECT_EQ(pa.status, 404);
+}
+
+// Regression (#12): a body larger than max_body_size is rejected during
+// streaming, not after buffering the whole request.
+TEST(StreamableHttpOversizeTest, OversizeBodyRejected) {
+    Implementation info{"oversize_server", "1.0.0"};
+    ServerCapabilities caps;
+    auto server = std::make_shared<McpServer>(info, caps);
+
+    HttpTransportConfig config;
+    config.mode = HttpTransportMode::StreamableHttp;
+    config.host = "127.0.0.1";
+    config.port = 0;
+    config.path = "/mcp";
+    config.max_body_size = 64;
+    auto transport = std::make_shared<HttpTransport>(config);
+    server->connect(transport);
+
+    ServerThread thread(*server);
+    thread.wait_until_ready();
+    int port = transport->get_port();
+
+    HttpClient client;
+    // make_initialize_request serializes to well over 64 bytes.
+    auto resp = client.post_and_parse("127.0.0.1", port, "/mcp", make_initialize_request(1), {});
+    EXPECT_EQ(resp.status, 400);
+}
+
+// Regression (#11): two requests pipelined into a single TCP write on one
+// keep-alive connection must BOTH be dispatched (previously the first was
+// lost/overwritten). Uses a raw socket with a 3s deadline.
+TEST_F(StreamableHttpTest, PipelinedRequestsBothDispatched) {
+    HttpClient client;
+    auto init = client.post_and_parse(host_, port_, "/mcp", make_initialize_request(1));
+    ASSERT_EQ(init.status, 200);
+    std::map<std::string, std::string> sh;
+    if (init.headers.count("mcp-session-id")) {
+        sh["mcp-session-id"] = init.headers["mcp-session-id"];
+    }
+    client.post_and_parse(host_, port_, "/mcp", make_initialized_notification(), sh);
+
+    asio::io_context io;
+    asio::ip::tcp::resolver resolver(io);
+    auto endpoints = resolver.resolve(host_, std::to_string(port_));
+    asio::ip::tcp::socket socket(io);
+    asio::connect(socket, endpoints);
+
+    std::string req1 = build_http_post(host_, port_, "/mcp", "application/json",
+                                       make_ping_request(10).dump(), sh);
+    std::string req2 = build_http_post(host_, port_, "/mcp", "application/json",
+                                       make_ping_request(11).dump(), sh);
+    asio::write(socket, asio::buffer(req1 + req2));
+
+    std::string all;
+    char rbuf[1024];
+    asio::steady_timer timer(io, std::chrono::seconds(3));
+    timer.async_wait([&](const asio::error_code& ec) {
+        if (!ec) {
+            socket.close();
+        }
+    });
+
+    std::function<void()> read_more;
+    bool both = false;
+    read_more = [&]() {
+        socket.async_read_some(asio::buffer(rbuf),
+            [&](const asio::error_code& ec, std::size_t n) {
+                if (ec) {
+                    return;
+                }
+                all.append(rbuf, n);
+                if (all.find("\"id\":10") != std::string::npos &&
+                    all.find("\"id\":11") != std::string::npos) {
+                    both = true;
+                    timer.cancel();
+                    return;
+                }
+                read_more();
+            });
+    };
+    read_more();
+    io.run();
+
+    EXPECT_TRUE(both);
+    EXPECT_NE(all.find("\"id\":10"), std::string::npos);
+    EXPECT_NE(all.find("\"id\":11"), std::string::npos);
+}

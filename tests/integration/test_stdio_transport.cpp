@@ -182,6 +182,33 @@ public:
 #endif
     }
 
+    // Wait (up to timeout_ms) for the child to exit on its own. Returns true
+    // if it exited; on success the handle is reaped so terminate() is a no-op.
+    bool wait_for_exit(int timeout_ms) {
+#ifdef _WIN32
+        if (!child_process_) return true;
+        DWORD r = WaitForSingleObject(child_process_, static_cast<DWORD>(timeout_ms));
+        if (r == WAIT_OBJECT_0) {
+            CloseHandle(child_process_);
+            child_process_ = nullptr;
+            return true;
+        }
+        return false;
+#else
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            int status;
+            pid_t r = waitpid(child_pid_, &status, WNOHANG);
+            if (r == child_pid_) {
+                child_pid_ = -1;
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+#endif
+    }
+
     void terminate() {
 #ifdef _WIN32
         if (stdin_write_) CloseHandle(stdin_write_);
@@ -313,4 +340,16 @@ TEST_F(StdioTransportTest, MalformedJson) {
 
     EXPECT_TRUE(error_resp.contains("error"));
     EXPECT_EQ(error_resp["error"]["code"], -32700); // PARSE_ERROR
+}
+
+// Regression (#13): closing stdin must make the server shut down. Previously
+// the io_context work_guard was never released on EOF, so the process hung.
+TEST_F(StdioTransportTest, ExitsOnStdinEof) {
+    process_->write_line(make_initialize_request(1).dump());
+    auto init_resp = process_->read_json_response();
+    ASSERT_EQ(init_resp["id"], 1);
+
+    process_->close_stdin();
+    bool exited = process_->wait_for_exit(5000);
+    EXPECT_TRUE(exited);
 }

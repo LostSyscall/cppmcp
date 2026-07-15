@@ -17,7 +17,8 @@ class ITransport;
 class RequestContext {
 public:
     RequestContext(McpServer& server, const RequestId& request_id,
-                  std::shared_ptr<ITransport> transport);
+                  std::shared_ptr<ITransport> transport,
+                  const std::string& session_id = std::string());
 
     void report_progress(double progress, std::optional<double> total = std::nullopt);
 
@@ -25,6 +26,7 @@ public:
              std::optional<std::string> logger = std::nullopt);
 
     const RequestId& request_id() const { return request_id_; }
+    const std::string& session_id() const { return session_id_; }
 
     // Set a progress token (defaults to request_id if not explicitly set)
     void set_progress_token(const RequestId& token) { progress_token_ = token; }
@@ -34,6 +36,7 @@ private:
     RequestId request_id_;
     RequestId progress_token_;
     std::shared_ptr<ITransport> transport_;
+    std::string session_id_;
 };
 
 } // namespace cppmcp

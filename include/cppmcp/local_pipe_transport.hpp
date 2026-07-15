@@ -1,10 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <deque>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -13,6 +11,7 @@
 #include <asio.hpp>
 #include <nlohmann/json.hpp>
 
+#include "async_write_queue.hpp"
 #include "transport.hpp"
 
 namespace cppmcp {
@@ -27,20 +26,24 @@ struct LocalPipeConfig {
     PipeMode mode = PipeMode::SingleClient;
     int max_instances = 4;
     size_t buffer_size = 65536;
+    size_t max_line_size = 4 * 1024 * 1024;
+    size_t write_queue_max_bytes = 0;
+    QueueOverflowPolicy write_queue_overflow = QueueOverflowPolicy::DropNewest;
 };
 
 // Per-connection state for asio-based async I/O
-struct PipeConnection {
+struct PipeConnection : std::enable_shared_from_this<PipeConnection> {
 #ifdef _WIN32
     asio::windows::stream_handle stream_handle;
 #else
     asio::local::stream_protocol::socket socket;
 #endif
     asio::streambuf read_buf;
-    std::deque<std::string> write_queue;
-    std::mutex write_mutex;
+    std::shared_ptr<AsyncWriteQueue> write_queue;
     std::atomic<bool> active{true};
     int connection_id = 0;
+    size_t max_line_size = 4 * 1024 * 1024;
+    std::function<void()> on_disconnect;
 
     ITransport::MessageCallback message_handler;
     ITransport::ErrorCallback error_handler;
@@ -52,9 +55,11 @@ struct PipeConnection {
 #endif
 
     void start_read();
+    void handle_read_completion(const asio::error_code& ec, std::size_t bytes_transferred);
     void handle_line(const std::string& line);
+    void init_write_queue(std::size_t max_queued_bytes, QueueOverflowPolicy policy);
+    void on_error();           // read/write failure -> deactivate + unregister
     void enqueue_write(std::string data);
-    void start_write();
 };
 
 class LocalPipeTransport : public ITransport {
@@ -69,8 +74,9 @@ public:
     void send_message(const nlohmann::json& message) override;
     void set_message_handler(MessageCallback handler) override;
     void set_error_handler(ErrorCallback handler) override;
-    void set_response_sender(ResponseSender sender) override;
     void set_io_context(asio::io_context* io_ctx) override;
+
+    void unregister_connection(std::shared_ptr<PipeConnection> conn);
 
 private:
     std::string resolve_pipe_path() const;
