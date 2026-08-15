@@ -202,8 +202,12 @@ TEST_F(McpClientTest, InboundRootsRequest) {
     req["id"] = "s1";
     req["method"] = Protocol::METHOD_ROOTS_LIST;
     transport_->deliver(req);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    json resp = transport_->find_result_for(RequestId{std::string{"s1"}});
+    // Poll instead of fixed sleep: shared CI runners can exceed 200ms.
+    json resp;
+    for (int i = 0; i < 100 && !resp.contains("result"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        resp = transport_->find_result_for(RequestId{std::string{"s1"}});
+    }
     ASSERT_TRUE(resp.contains("result"));
     EXPECT_EQ(resp["result"]["roots"][0]["uri"], "file:///workspace");
 }
@@ -214,8 +218,11 @@ TEST_F(McpClientTest, InboundPingAutoAnswered) {
     req["id"] = "p1";
     req["method"] = Protocol::METHOD_PING;
     transport_->deliver(req);
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    json resp = transport_->find_result_for(RequestId{std::string{"p1"}});
+    json resp;
+    for (int i = 0; i < 100 && !resp.contains("result"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        resp = transport_->find_result_for(RequestId{std::string{"p1"}});
+    }
     EXPECT_TRUE(resp.contains("result"));
 }
 
