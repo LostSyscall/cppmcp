@@ -70,7 +70,11 @@ jobs:
 
       - name: Unit tests
         working-directory: build
-        run: ctest -E integration --output-on-failure -C ${{ matrix.build_type }} --timeout 120
+        run: |
+          set -o pipefail
+          ctest -E integration --output-on-failure -C ${{ matrix.build_type }} --timeout 120 2>&1 | tee ctest-unit.log | tail -40
+          echo "=== failing tests ==="
+          grep -E "FAILED|Failed" ctest-unit.log | head -20 || true
 
       - name: Integration tests
         working-directory: build
