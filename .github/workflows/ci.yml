@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  VCPKG_COMMIT: '2025.01.13'
-
 jobs:
   build-and-test:
     name: ${{ matrix.os }} / ${{ matrix.build_type }}
@@ -25,19 +22,26 @@ jobs:
       - name: Setup vcpkg (clone + bootstrap)
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_INSTALLATION_ROOT/vcpkg" || true
-          cd "$VCPKG_INSTALLATION_ROOT/vcpkg"
-          # Pin to the baseline commit for reproducibility
-          git fetch --depth 1 origin $VCPKG_COMMIT && git checkout $VCPKG_COMMIT
-          ./bootstrap-vcpkg.sh -disableMetrics || ./bootstrap-vcpkg.bat -disableMetrics
-          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT/vcpkg" >> "$GITHUB_ENV"
+          set -e
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            VCPKG_DIR="$RUNNER_TEMP/vcpkg"
+          else
+            VCPKG_DIR=/opt/vcpkg
+          fi
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_DIR"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$VCPKG_DIR/bootstrap-vcpkg.bat" -disableMetrics
+          else
+            "$VCPKG_DIR/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          echo "VCPKG_ROOT=$VCPKG_DIR" >> "$GITHUB_ENV"
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: |
-            C:/vcpkg/archives
-            ~/.cache/vcpkg/archives
+            ~/AppData/Local/vcpkg/archives
+            /opt/vcpkg/archives
           key: vcpkg-bin-${{ matrix.os }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: vcpkg-bin-${{ matrix.os }}-
 
@@ -94,16 +98,15 @@ jobs:
       - name: Setup vcpkg (clone + bootstrap)
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git /opt/vcpkg
-          cd /opt/vcpkg
-          git fetch --depth 1 origin $VCPKG_COMMIT && git checkout $VCPKG_COMMIT
-          ./bootstrap-vcpkg.sh -disableMetrics
+          set -e
+          git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg
+          /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
           echo "VCPKG_ROOT=/opt/vcpkg" >> "$GITHUB_ENV"
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/vcpkg/archives
+          path: /opt/vcpkg/archives
           key: vcpkg-bin-ubuntu-asan-${{ hashFiles('vcpkg.json') }}
           restore-keys: vcpkg-bin-ubuntu-
 
