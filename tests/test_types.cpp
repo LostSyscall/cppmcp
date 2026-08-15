@@ -54,7 +54,8 @@ TEST(TypesTest, CallToolResultSerialization) {
     json j = result;
     EXPECT_EQ(j["content"][0]["type"], "text");
     EXPECT_EQ(j["content"][0]["text"], "Result data");
-    EXPECT_FALSE(j["isError"].get<bool>());
+    // isError is omitted when false (MCP spec: false is the default).
+    EXPECT_FALSE(j.value("isError", false));
 }
 
 TEST(TypesTest, ResourceSerialization) {

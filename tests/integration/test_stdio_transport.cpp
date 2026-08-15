@@ -317,7 +317,7 @@ TEST_F(StdioTransportTest, ToolsCall) {
 
     EXPECT_EQ(call_resp["id"], 3);
     EXPECT_EQ(call_resp["result"]["content"][0]["text"], "stdio test");
-    EXPECT_FALSE(call_resp["result"]["isError"].get<bool>());
+    EXPECT_FALSE(call_resp["result"].value("isError", false));
 }
 
 TEST_F(StdioTransportTest, ToolsList) {

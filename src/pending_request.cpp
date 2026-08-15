@@ -1,6 +1,7 @@
 #include "cppmcp/pending_request.hpp"
 
 #include "cppmcp/client.hpp"
+#include "cppmcp/logging.hpp"
 #include "cppmcp/protocol.hpp"
 
 namespace cppmcp {
@@ -68,8 +69,16 @@ void PendingRequest::deliver_progress(double progress, std::optional<double> tot
     }
     auto self = shared_from_this();
     auto fire = [self, progress, total]() {
-        if (self->on_progress_) {
+        if (!self->on_progress_) {
+            return;
+        }
+        // A throwing user callback must not take down the io/executor thread.
+        try {
             self->on_progress_(progress, total);
+        } catch (const std::exception& e) {
+            AsyncLogger::instance().log(std::string("on_progress callback threw: ") + e.what());
+        } catch (...) {
+            AsyncLogger::instance().log("on_progress callback threw an unknown exception");
         }
     };
     if (callback_executor_) {
@@ -100,12 +109,19 @@ void PendingRequest::dispatch_callbacks() {
     auto self = shared_from_this();
     auto fire = [self]() {
         const auto& o = self->outcome_;
-        if (o.terminal == RequestState::Succeeded) {
-            if (self->on_complete_) {
-                self->on_complete_(o.result);
+        try {
+            if (o.terminal == RequestState::Succeeded) {
+                if (self->on_complete_) {
+                    self->on_complete_(o.result);
+                }
+            } else if (self->on_error_) {
+                self->on_error_(o);
             }
-        } else if (self->on_error_) {
-            self->on_error_(o);
+        } catch (const std::exception& e) {
+            // A throwing user callback must not take down the io/executor thread.
+            AsyncLogger::instance().log(std::string("request callback threw: ") + e.what());
+        } catch (...) {
+            AsyncLogger::instance().log("request callback threw an unknown exception");
         }
     };
     if (callback_executor_) {

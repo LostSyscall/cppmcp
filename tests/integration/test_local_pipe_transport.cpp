@@ -318,7 +318,7 @@ TEST_F(LocalPipeTest, ToolsCall) {
 
     EXPECT_EQ(call_resp["id"], 3);
     EXPECT_EQ(call_resp["result"]["content"][0]["text"], "hello pipe");
-    EXPECT_FALSE(call_resp["result"]["isError"].get<bool>());
+    EXPECT_FALSE(call_resp["result"].value("isError", false));
 
     client.close();
 }

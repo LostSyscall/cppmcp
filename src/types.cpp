@@ -21,8 +21,19 @@ void from_json(const nlohmann::json& j, ImageContent& i) {
     j.at("mimeType").get_to(i.mime_type);
 }
 
+void to_json(nlohmann::json& j, const AudioContent& a) {
+    j = nlohmann::json{{"type", a.type}, {"data", a.data}, {"mimeType", a.mime_type}};
+}
+
+void from_json(const nlohmann::json& j, AudioContent& a) {
+    j.at("type").get_to(a.type);
+    j.at("data").get_to(a.data);
+    j.at("mimeType").get_to(a.mime_type);
+}
+
 void to_json(nlohmann::json& j, const ResourceContents& r) {
-    j = nlohmann::json{{"uri", r.uri}, {"mimeType", r.mime_type}};
+    j = nlohmann::json{{"uri", r.uri}};
+    if (!r.mime_type.empty()) j["mimeType"] = r.mime_type;
     if (r.text) j["text"] = *r.text;
     if (r.blob) j["blob"] = *r.blob;
 }
@@ -65,6 +76,7 @@ Content content_from_json(const nlohmann::json& j) {
     std::string type = j.at("type").get<std::string>();
     if (type == "text") return j.get<TextContent>();
     if (type == "image") return j.get<ImageContent>();
+    if (type == "audio") return j.get<AudioContent>();
     if (type == "resource") return j.get<EmbeddedResource>();
     if (type == "resource_link") return j.get<ResourceLink>();
     throw std::invalid_argument("Unknown content type: " + type);
@@ -111,7 +123,7 @@ void to_json(nlohmann::json& j, const CallToolResult& r) {
     j = nlohmann::json::object();
     j["content"] = std::move(content_json);
     if (r.structured_content) j["structuredContent"] = *r.structured_content;
-    j["isError"] = r.is_error;
+    if (r.is_error) j["isError"] = true;  // omit on success (MCP spec: false is the default)
 }
 
 void from_json(const nlohmann::json& j, CallToolResult& r) {
@@ -119,7 +131,18 @@ void from_json(const nlohmann::json& j, CallToolResult& r) {
         r.content.push_back(content_from_json(item));
     }
     if (j.contains("structuredContent")) j.at("structuredContent").get_to(r.structured_content.emplace());
-    j.at("isError").get_to(r.is_error);
+    r.is_error = j.value("isError", false);  // tolerate third-party servers omitting it
+}
+
+void to_json(nlohmann::json& j, const ResourceAnnotations& ra) {
+    j = nlohmann::json::object();
+    if (ra.audience) j["audience"] = *ra.audience;
+    if (ra.priority) j["priority"] = *ra.priority;
+}
+
+void from_json(const nlohmann::json& j, ResourceAnnotations& ra) {
+    if (j.contains("audience")) j.at("audience").get_to(ra.audience.emplace());
+    if (j.contains("priority")) j.at("priority").get_to(ra.priority.emplace());
 }
 
 void to_json(nlohmann::json& j, const Resource& r) {
@@ -127,6 +150,11 @@ void to_json(nlohmann::json& j, const Resource& r) {
     if (r.title) j["title"] = *r.title;
     if (r.description) j["description"] = *r.description;
     if (r.mime_type) j["mimeType"] = *r.mime_type;
+    if (r.annotations) {
+        nlohmann::json sub;
+        to_json(sub, *r.annotations);
+        j["annotations"] = sub;
+    }
 }
 
 void from_json(const nlohmann::json& j, Resource& r) {
@@ -135,6 +163,11 @@ void from_json(const nlohmann::json& j, Resource& r) {
     if (j.contains("title")) j.at("title").get_to(r.title.emplace());
     if (j.contains("description")) j.at("description").get_to(r.description.emplace());
     if (j.contains("mimeType")) j.at("mimeType").get_to(r.mime_type.emplace());
+    if (j.contains("annotations")) {
+        ResourceAnnotations ra;
+        from_json(j.at("annotations"), ra);
+        r.annotations = ra;
+    }
 }
 
 void to_json(nlohmann::json& j, const ReadResourceResult& r) {
@@ -287,6 +320,19 @@ void to_json(nlohmann::json& j, const ClientCapabilities& c) {
     if (c.experimental) j["experimental"] = *c.experimental;
 }
 
+void from_json(const nlohmann::json& j, ClientCapabilities& c) {
+    if (j.contains("sampling")) c.sampling = SamplingCapability{};
+    if (j.contains("elicitation")) c.elicitation = ElicitationCapability{};
+    if (j.contains("roots")) {
+        RootsCapability rc;
+        if (j.at("roots").contains("listChanged")) {
+            rc.list_changed = j.at("roots").at("listChanged").get<bool>();
+        }
+        c.roots = rc;
+    }
+    if (j.contains("experimental")) c.experimental = j.at("experimental");
+}
+
 void to_json(nlohmann::json& j, const Implementation& impl) {
     j = nlohmann::json{{"name", impl.name}, {"version", impl.version}};
 }
@@ -326,6 +372,44 @@ void to_json(nlohmann::json& j, const CompleteResult& r) {
     j = nlohmann::json{{"completion", r.completion}};
 }
 
+void to_json(nlohmann::json& j, const ModelHint& h) {
+    j = nlohmann::json::object();
+    if (h.name) j["name"] = *h.name;
+}
+
+void from_json(const nlohmann::json& j, ModelHint& h) {
+    if (j.contains("name")) j.at("name").get_to(h.name.emplace());
+}
+
+void to_json(nlohmann::json& j, const ModelPreferences& p) {
+    j = nlohmann::json::object();
+    if (!p.hints.empty()) {
+        nlohmann::json hints = nlohmann::json::array();
+        for (const auto& h : p.hints) {
+            nlohmann::json hj;
+            to_json(hj, h);
+            hints.push_back(hj);
+        }
+        j["hints"] = std::move(hints);
+    }
+    if (p.cost_priority) j["costPriority"] = *p.cost_priority;
+    if (p.speed_priority) j["speedPriority"] = *p.speed_priority;
+    if (p.intelligence_priority) j["intelligencePriority"] = *p.intelligence_priority;
+}
+
+void from_json(const nlohmann::json& j, ModelPreferences& p) {
+    if (j.contains("hints")) {
+        for (const auto& item : j.at("hints")) {
+            ModelHint h;
+            from_json(item, h);
+            p.hints.push_back(h);
+        }
+    }
+    if (j.contains("costPriority")) j.at("costPriority").get_to(p.cost_priority.emplace());
+    if (j.contains("speedPriority")) j.at("speedPriority").get_to(p.speed_priority.emplace());
+    if (j.contains("intelligencePriority")) j.at("intelligencePriority").get_to(p.intelligence_priority.emplace());
+}
+
 void to_json(nlohmann::json& j, const SamplingMessage& m) {
     j = nlohmann::json{{"role", m.role}, {"content", content_to_json(m.content)}};
 }
@@ -343,7 +427,11 @@ void to_json(nlohmann::json& j, const CreateMessageRequestParams& p) {
         messages.push_back(mj);
     }
     j = nlohmann::json{{"messages", messages}};
-    if (p.model) j["model"] = *p.model;
+    if (p.model_preferences) {
+        nlohmann::json mp;
+        to_json(mp, *p.model_preferences);
+        j["modelPreferences"] = std::move(mp);
+    }
     if (p.system_prompt) j["systemPrompt"] = *p.system_prompt;
     if (p.include_context) j["includeContext"] = *p.include_context;
     if (p.temperature) j["temperature"] = *p.temperature;
@@ -358,7 +446,11 @@ void from_json(const nlohmann::json& j, CreateMessageRequestParams& p) {
         from_json(item, m);
         p.messages.push_back(m);
     }
-    if (j.contains("model")) j.at("model").get_to(p.model.emplace());
+    if (j.contains("modelPreferences")) {
+        ModelPreferences mp;
+        from_json(j.at("modelPreferences"), mp);
+        p.model_preferences = mp;
+    }
     if (j.contains("systemPrompt")) j.at("systemPrompt").get_to(p.system_prompt.emplace());
     if (j.contains("includeContext")) j.at("includeContext").get_to(p.include_context.emplace());
     if (j.contains("temperature")) j.at("temperature").get_to(p.temperature.emplace());

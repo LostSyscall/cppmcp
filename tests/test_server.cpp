@@ -251,7 +251,8 @@ TEST(ServerTest, HandleToolsCall) {
         json resp = json::parse(line);
         if (resp["id"] == 4) {
             EXPECT_EQ(resp["result"]["content"][0]["text"], "hello");
-            EXPECT_FALSE(resp["result"]["isError"].get<bool>());
+            // isError omitted when false (MCP spec default).
+            EXPECT_FALSE(resp["result"].value("isError", false));
             found = true;
             break;
         }
@@ -276,7 +277,7 @@ TEST(ServerTest, RejectRequestBeforeInit) {
 
     std::string output = transport->get_output();
     json response = json::parse(output.substr(0, output.find('\n')));
-    EXPECT_EQ(response["error"]["code"], Protocol::INVALID_REQUEST);
+    EXPECT_EQ(response["error"]["code"], Protocol::SERVER_NOT_INITIALIZED);
 }
 
 TEST(ServerTest, MethodNotFound) {

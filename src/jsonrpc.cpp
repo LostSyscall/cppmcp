@@ -3,78 +3,116 @@
 
 namespace cppmcp {
 
+namespace {
+
+// Shared jsonrpc-2.0 version check. Returns true on a valid object with the
+// right version; false otherwise (caller maps that to an INVALID_REQUEST error).
+bool check_jsonrpc_envelope(const nlohmann::json& raw) {
+    return raw.is_object() && raw.contains("jsonrpc") && raw["jsonrpc"] == "2.0";
+}
+
+// Parse the "id" member of a REQUEST. JSON-RPC 2.0 forbids null (and fractional)
+// ids on requests; a null id means "respond with null id" for envelope errors.
+// Returns nullptr-parity via ok=false on unusable ids.
+bool request_id_from_json(const nlohmann::json& raw, RequestId& out) {
+    try {
+        from_json(raw, out);
+    } catch (const std::exception&) {
+        return false;  // fractional/other invalid types -> INVALID_REQUEST
+    }
+    return !std::holds_alternative<NullId>(out);
+}
+
+// Build a request from a raw object that has both "id" and "method". On any
+// structural problem returns a JsonRpcErrorResponse (id captured when possible).
+JsonRpcErrorResponse make_method_error(const nlohmann::json& /*raw*/, const RequestId& id, const char* why) {
+    return JsonRpcErrorResponse{"2.0", id, JsonRpcErrorDetail{Protocol::INVALID_REQUEST, why}};
+}
+
+// Validate params: present + non-null must be object or array.
+bool params_ok(const nlohmann::json& raw) {
+    if (!raw.contains("params") || raw["params"].is_null()) return true;
+    return raw["params"].is_object() || raw["params"].is_array();
+}
+
+}  // namespace
+
 ParsedMessage parse_message(const nlohmann::json& raw) {
     try {
-        // Validate jsonrpc version
-        if (!raw.is_object() || !raw.contains("jsonrpc") || raw["jsonrpc"] != "2.0") {
+        if (!check_jsonrpc_envelope(raw)) {
             return JsonRpcErrorResponse{
                 "2.0", NullId{},
                 JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Invalid or missing jsonrpc version"}
             };
         }
 
-        // Determine if this is a request (has id), notification (no id), or response
         if (raw.contains("id")) {
             if (raw.contains("method")) {
-                // Validate method is a string
-                if (!raw["method"].is_string()) {
-                    RequestId id;
-                    from_json(raw["id"], id);
-                    return JsonRpcErrorResponse{
-                        "2.0", id,
-                        JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Method must be a string"}
-                    };
+                RequestId id;
+                if (!request_id_from_json(raw["id"], id)) {
+                    return make_method_error(raw, NullId{},
+                                             "Request id must be a string or number (null is not allowed)");
                 }
-
+                if (!raw["method"].is_string()) {
+                    return make_method_error(raw, id, "Method must be a string");
+                }
+                if (!params_ok(raw)) {
+                    return make_method_error(raw, id, "Params must be a structured value (object or array)");
+                }
                 JsonRpcRequest req;
                 req.jsonrpc = "2.0";
-                from_json(raw["id"], req.id);
+                req.id = id;
                 req.method = raw["method"].get<std::string>();
                 if (raw.contains("params") && !raw["params"].is_null()) {
-                    if (!raw["params"].is_object() && !raw["params"].is_array()) {
-                        return JsonRpcErrorResponse{
-                            "2.0", req.id,
-                            JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
-                        };
-                    }
                     req.params = raw["params"];
                 }
                 return req;
             }
-            // Response — server shouldn't receive these
+            // Server view: a response (id, no method) is unexpected — unless it
+            // answers a server-initiated request (sampling/roots/etc.). The
+            // server layer re-routes via on_client_response before treating
+            // this as an error, so preserve success/error detail here.
             RequestId id;
             from_json(raw["id"], id);
+            if (raw.contains("result")) {
+                JsonRpcSuccessResponse resp;
+                resp.jsonrpc = "2.0";
+                resp.id = id;
+                resp.result = raw["result"];
+                return resp;
+            }
             return JsonRpcErrorResponse{
                 "2.0", id,
                 JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Server received a response message (unexpected)"}
             };
-        } else if (raw.contains("method")) {
+        }
+
+        if (raw.contains("method")) {
             if (!raw["method"].is_string()) {
                 return JsonRpcErrorResponse{
                     "2.0", NullId{},
                     JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Method must be a string"}
                 };
             }
-
+            if (!params_ok(raw)) {
+                return JsonRpcErrorResponse{
+                    "2.0", NullId{},
+                    JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
+                };
+            }
             JsonRpcNotification notif;
             notif.jsonrpc = "2.0";
             notif.method = raw["method"].get<std::string>();
             if (raw.contains("params") && !raw["params"].is_null()) {
-                if (!raw["params"].is_object() && !raw["params"].is_array()) {
-                    return JsonRpcErrorResponse{
-                        "2.0", NullId{},
-                        JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
-                    };
-                }
                 notif.params = raw["params"];
             }
             return notif;
-        } else {
-            return JsonRpcErrorResponse{
-                "2.0", NullId{},
-                JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Message must have method or be a valid request"}
-            };
         }
+
+        return JsonRpcErrorResponse{
+            "2.0", NullId{},
+            JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Message must have method or be a valid request"}
+        };
     } catch (const std::exception& e) {
         return JsonRpcErrorResponse{
             "2.0", NullId{},
@@ -85,7 +123,7 @@ ParsedMessage parse_message(const nlohmann::json& raw) {
 
 ClientParsedMessage parse_message_client(const nlohmann::json& raw) {
     try {
-        if (!raw.is_object() || !raw.contains("jsonrpc") || raw["jsonrpc"] != "2.0") {
+        if (!check_jsonrpc_envelope(raw)) {
             return JsonRpcErrorResponse{
                 "2.0", NullId{},
                 JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Invalid or missing jsonrpc version"}
@@ -94,29 +132,28 @@ ClientParsedMessage parse_message_client(const nlohmann::json& raw) {
 
         if (raw.contains("id")) {
             if (raw.contains("method")) {
-                // Inbound Request from the server (sampling/elicitation/roots).
+                // Inbound Request (server: client->server request; client: server->client).
+                RequestId id;
+                if (!request_id_from_json(raw["id"], id)) {
+                    return make_method_error(raw, NullId{},
+                                             "Request id must be a string or number (null is not allowed)");
+                }
+                if (!raw["method"].is_string()) {
+                    return make_method_error(raw, id, "Method must be a string");
+                }
+                if (!params_ok(raw)) {
+                    return make_method_error(raw, id, "Params must be a structured value (object or array)");
+                }
                 JsonRpcRequest req;
                 req.jsonrpc = "2.0";
-                from_json(raw["id"], req.id);
-                if (!raw["method"].is_string()) {
-                    return JsonRpcErrorResponse{
-                        "2.0", req.id,
-                        JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Method must be a string"}
-                    };
-                }
+                req.id = id;
                 req.method = raw["method"].get<std::string>();
                 if (raw.contains("params") && !raw["params"].is_null()) {
-                    if (!raw["params"].is_object() && !raw["params"].is_array()) {
-                        return JsonRpcErrorResponse{
-                            "2.0", req.id,
-                            JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
-                        };
-                    }
                     req.params = raw["params"];
                 }
                 return req;
             }
-            // Response to one of our outbound requests.
+            // A message with id but no method is a RESPONSE.
             RequestId id;
             from_json(raw["id"], id);
             if (raw.contains("result")) {
@@ -136,28 +173,31 @@ ClientParsedMessage parse_message_client(const nlohmann::json& raw) {
             }
             return JsonRpcErrorResponse{
                 "2.0", id,
-                JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Response has neither result nor error"}
+                JsonRpcErrorDetail{Protocol::INVALID_REQUEST,
+                                   raw.contains("result") || raw.contains("error")
+                                       ? "Response has neither result nor error"
+                                       : "Server received a response message (unexpected)"}
             };
         }
 
         if (raw.contains("method")) {
-            // Notification (server-initiated push, progress, list_changed, cancelled).
+            // Notification (no id).
             if (!raw["method"].is_string()) {
                 return JsonRpcErrorResponse{
                     "2.0", NullId{},
                     JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Method must be a string"}
                 };
             }
+            if (!params_ok(raw)) {
+                return JsonRpcErrorResponse{
+                    "2.0", NullId{},
+                    JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
+                };
+            }
             JsonRpcNotification notif;
             notif.jsonrpc = "2.0";
             notif.method = raw["method"].get<std::string>();
             if (raw.contains("params") && !raw["params"].is_null()) {
-                if (!raw["params"].is_object() && !raw["params"].is_array()) {
-                    return JsonRpcErrorResponse{
-                        "2.0", NullId{},
-                        JsonRpcErrorDetail{Protocol::INVALID_REQUEST, "Params must be a structured value (object or array)"}
-                    };
-                }
                 notif.params = raw["params"];
             }
             return notif;

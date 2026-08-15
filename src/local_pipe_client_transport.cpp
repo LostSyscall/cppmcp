@@ -64,21 +64,33 @@ void LocalPipeClientTransport::connect() {
 #ifdef _WIN32
     std::string path = resolve_path();
     HANDLE h = INVALID_HANDLE_VALUE;
-    for (int i = 0; i < 100 && h == INVALID_HANDLE_VALUE; ++i) {
+    // Retry only on transient "not ready yet" conditions:
+    //   ERROR_PIPE_BUSY      -> all pipe instances busy; wait then retry
+    //   ERROR_FILE_NOT_FOUND -> server hasn't created the pipe yet; brief poll
+    // Everything else (ACCESS_DENIED, INVALID_PARAMETER, ...) fails fast.
+    constexpr int MAX_RETRIES = 100;
+    constexpr auto POLL_INTERVAL = std::chrono::milliseconds(50);
+    DWORD last_err = 0;
+    for (int i = 0; i < MAX_RETRIES && h == INVALID_HANDLE_VALUE; ++i) {
         h = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                         OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            DWORD err = GetLastError();
-            if (err == ERROR_PIPE_BUSY) {
-                WaitNamedPipeA(path.c_str(), 1000);
+            last_err = GetLastError();
+            if (last_err == ERROR_PIPE_BUSY) {
+                // WaitNamedPipeA blocks until a pipe instance is free OR timeout.
+                WaitNamedPipeA(path.c_str(), 200);
+            } else if (last_err == ERROR_FILE_NOT_FOUND) {
+                std::this_thread::sleep_for(POLL_INTERVAL);
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                // Non-transient error: do not retry.
+                break;
             }
         }
     }
     if (h == INVALID_HANDLE_VALUE) {
         connected_.store(false);
-        throw std::runtime_error("LocalPipeClientTransport: failed to connect pipe: " + path);
+        throw std::runtime_error("LocalPipeClientTransport: failed to connect pipe (" +
+                                 std::to_string(last_err) + "): " + path);
     }
     handle_ = std::make_unique<asio::windows::stream_handle>(*io_ctx_, h);
 #else
@@ -132,7 +144,14 @@ void LocalPipeClientTransport::disconnect() {
         socket_->close(ec);
     }
 #endif
-    clear_handlers();
+    // Defer clearing handlers so the in-flight read completion (triggered by
+    // handle/socket close) can still invoke disconnect_handler_.
+    if (io_ctx_ && (message_handler_ || error_handler_ || disconnect_handler_)) {
+        auto self = shared_from_this();
+        asio::post(*io_ctx_, [self]() { self->clear_handlers(); });
+    } else {
+        clear_handlers();
+    }
 }
 
 void LocalPipeClientTransport::clear_handlers() {

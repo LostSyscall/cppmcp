@@ -18,4 +18,21 @@ void RequestContext::log(const std::string& level, const std::string& data,
     server_.notify_logging(level, data, logger, session_id_);
 }
 
+bool RequestContext::request_sampling(const CreateMessageRequestParams& params,
+                                      std::function<void(const CreateMessageResult&)> on_result,
+                                      std::function<void(const McpException&)> on_error) const {
+    return server_.request_sampling(params, std::move(on_result), std::move(on_error), session_id_);
+}
+
+bool RequestContext::request_elicitation(const ElicitRequestParams& params,
+                                         std::function<void(const ElicitResult&)> on_result,
+                                         std::function<void(const McpException&)> on_error) const {
+    return server_.request_elicitation(params, std::move(on_result), std::move(on_error), session_id_);
+}
+
+bool RequestContext::request_roots(std::function<void(const ListRootsResult&)> on_result,
+                                   std::function<void(const McpException&)> on_error) const {
+    return server_.request_roots(std::move(on_result), std::move(on_error), session_id_);
+}
+
 } // namespace cppmcp

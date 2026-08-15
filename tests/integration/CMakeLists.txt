@@ -9,7 +9,8 @@ add_executable(cppmcp_integration_tests
 )
 
 target_link_libraries(cppmcp_integration_tests PRIVATE
-    cppmcp_lib
+    cppmcp_server
+    cppmcp_client
     GTest::gtest
     GTest::gtest_main
 )
@@ -29,10 +30,12 @@ add_executable(cppmcp_test_stdio_server
 )
 
 target_link_libraries(cppmcp_test_stdio_server PRIVATE
-    cppmcp_lib
+    cppmcp_server
 )
 
 include(GoogleTest)
+# TIMEOUT bounds each test: a hung child process / dead socket must fail the
+# suite instead of stalling CI forever.
 gtest_discover_tests(cppmcp_integration_tests
-    PROPERTIES LABELS "integration"
+    PROPERTIES LABELS "integration" TIMEOUT 120
 )

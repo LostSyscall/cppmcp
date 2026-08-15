@@ -1,4 +1,10 @@
 {
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "cppmcp",
+  "version": "0.2.0",
+  "description": "C++17 implementation of the Model Context Protocol (MCP) server and client: stdio, Streamable HTTP, SSE and local-pipe transports over asio + llhttp.",
+  "homepage": "https://github.com/LostSyscall/cppmcp",
+  "license": "MIT",
   "dependencies": [
     "nlohmann-json",
     "asio",

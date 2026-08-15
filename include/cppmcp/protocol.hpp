@@ -1,14 +1,22 @@
 #pragma once
 
+#include <initializer_list>
 #include <string>
 
 #include "error_codes.hpp"
 
 namespace cppmcp::Protocol {
 
-// Protocol versions
-constexpr const char* LATEST_PROTOCOL_VERSION = "2025-11-25";
-constexpr const char* DEFAULT_NEGOTIATED_VERSION = "2025-03-26";
+// Protocol revisions the library understands, newest first.
+constexpr const char* LATEST_PROTOCOL_VERSION = "2025-06-18";
+constexpr const char* VERSION_2025_06_18 = "2025-06-18";
+constexpr const char* VERSION_2025_03_26 = "2025-03-26";
+// Best version offered when the client requests something unsupported.
+constexpr const char* DEFAULT_NEGOTIATED_VERSION = VERSION_2025_06_18;
+
+inline bool is_supported_version(const std::string& v) {
+    return v == VERSION_2025_06_18 || v == VERSION_2025_03_26;
+}
 
 // Request method names
 constexpr const char* METHOD_INITIALIZE = "initialize";

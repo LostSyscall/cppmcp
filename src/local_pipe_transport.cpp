@@ -50,13 +50,13 @@ void PipeConnection::handle_read_completion(const asio::error_code& ec, std::siz
     line.reserve(bytes_transferred);
     auto bufs = read_buf.data();
     for (auto it = asio::buffers_begin(bufs); it != asio::buffers_begin(bufs) + bytes_transferred; ++it) {
-        line += *it;
+        line.push_back(*it);
     }
     read_buf.consume(bytes_transferred);
 
     if (line.size() > max_line_size) {
         enqueue_write(make_error_response_null_id(Protocol::PARSE_ERROR, "Message too large").dump());
-        on_error();
+        on_error();  // drop the connection: peer is broken or hostile
         return;
     }
 
@@ -84,14 +84,16 @@ void PipeConnection::handle_line(const std::string& line) {
             message_handler(json_msg, sink, "");
         }
     } catch (const nlohmann::json::parse_error& e) {
-        auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, e.what());
+        AsyncLogger::instance().log(std::string("JSON parse error: ") + e.what());
+        auto error_resp = make_error_response_null_id(Protocol::PARSE_ERROR, "Parse error");
         enqueue_write(error_resp.dump());
         if (error_handler) {
-            error_handler("JSON parse error: " + std::string(e.what()));
+            error_handler("JSON parse error");
         }
     } catch (const std::exception& e) {
+        AsyncLogger::instance().log(std::string("Error processing message: ") + e.what());
         if (error_handler) {
-            error_handler("Error processing message: " + std::string(e.what()));
+            error_handler("Error processing message");
         }
     }
 }
@@ -174,9 +176,9 @@ void LocalPipeTransport::start() {
     running_ = true;
     win32_accept_thread_ = std::thread(&LocalPipeTransport::win32_accept_loop, this);
 
-    std::cerr << "[cppmcp] Local pipe server starting on " << resolve_pipe_path()
-              << " (mode: " << (config_.mode == PipeMode::SingleClient ? "SingleClient" : "MultiClient")
-              << ", asio async)" << std::endl;
+    AsyncLogger::instance().log(std::string("[cppmcp] Local pipe server starting on ") + resolve_pipe_path() +
+                                " (mode: " + (config_.mode == PipeMode::SingleClient ? "SingleClient" : "MultiClient") +
+                                ", asio async)");
 }
 
 void LocalPipeTransport::win32_accept_loop() {
@@ -339,9 +341,9 @@ void LocalPipeTransport::start() {
 
     do_accept();
 
-    std::cerr << "[cppmcp] Local pipe server starting on " << path
-              << " (mode: " << (config_.mode == PipeMode::SingleClient ? "SingleClient" : "MultiClient")
-              << ", asio async)" << std::endl;
+    AsyncLogger::instance().log(std::string("[cppmcp] Local pipe server starting on ") + path +
+                                " (mode: " + (config_.mode == PipeMode::SingleClient ? "SingleClient" : "MultiClient") +
+                                ", asio async)");
 }
 
 void LocalPipeTransport::do_accept() {

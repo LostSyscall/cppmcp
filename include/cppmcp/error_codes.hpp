@@ -9,6 +9,9 @@ constexpr int METHOD_NOT_FOUND = -32601;
 constexpr int INVALID_PARAMS = -32602;
 constexpr int INTERNAL_ERROR = -32603;
 
+// MCP-specific error codes (outside the JSON-RPC reserved range)
+constexpr int SERVER_NOT_INITIALIZED = -32002;
+
 // Local client-side outcome codes (NOT standard JSON-RPC). McpClient uses these
 // inside McpException/McpOutcome to signal local terminal states (timeout,
 // cancel, transport disconnect, shutdown) so they are distinguishable from real

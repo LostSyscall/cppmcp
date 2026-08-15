@@ -176,6 +176,9 @@ protected:
 
     void TearDown() override {
         server_thread_->stop();
+        server_thread_.reset();
+        transport_.reset();
+        server_.reset();
     }
 
     std::shared_ptr<McpServer> server_;

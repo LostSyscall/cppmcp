@@ -38,7 +38,7 @@ public:
 
     virtual void set_message_handler(MessageCallback handler) = 0;
     virtual void set_error_handler(ErrorCallback handler) = 0;
-    virtual void set_disconnect_handler(DisconnectCallback handler) {}
+    virtual void set_disconnect_handler(DisconnectCallback /*handler*/) {}
     virtual void set_io_context(asio::io_context* io_ctx) = 0;
 
     // Transport-managed session id (Streamable HTTP mcp-session-id). Empty for

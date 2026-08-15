@@ -218,3 +218,120 @@ TEST_F(McpClientTest, InboundPingAutoAnswered) {
     json resp = transport_->find_result_for(RequestId{std::string{"p1"}});
     EXPECT_TRUE(resp.contains("result"));
 }
+
+// --- 2026-08 hardening regressions ---
+
+// Reconnect regression: transports clear their handlers on disconnect(), so a
+// second connect() used to leave the transport deaf (responses silently
+// dropped -> initialize timeout). connect() must re-attach handlers.
+TEST_F(McpClientTest, ReconnectReattachesTransportHandlers) {
+    transport_->set_on_send([this](const json& m) {
+        if (m.contains("method") && m["method"] == "initialize") {
+            // Find the request id this client used.
+            RequestId rid = NullId{};
+            if (m.contains("id") && m["id"].is_number_integer()) {
+                rid = m["id"].get<int64_t>();
+            }
+            transport_->deliver(make_init_response(rid));
+        }
+    });
+
+    auto sr = client_->connect(std::chrono::seconds(5));
+    EXPECT_EQ(sr.server_info.name, "mock");
+    client_->disconnect();
+
+    // Reconnect on the SAME client + transport: must complete the handshake.
+    auto sr2 = client_->connect(std::chrono::seconds(5));
+    EXPECT_EQ(sr2.server_info.name, "mock");
+}
+
+// A throwing user callback must not terminate the process; the promise is
+// still satisfied so get() returns.
+TEST_F(McpClientTest, ThrowingOnCompleteDoesNotKillIoThread) {
+    // SetUp already connected; add a ping responder alongside initialize.
+    transport_->set_on_send([this](const json& m) {
+        if (m.value("method", "") == "initialize" && m.contains("id")) {
+            RequestId id;
+            from_json(m["id"], id);
+            transport_->deliver(make_init_response(id));
+            return;
+        }
+        if (m.value("method", "") == "ping" && m.contains("id")) {
+            RequestId rid;
+            from_json(m["id"], rid);
+            json resp;
+            resp["jsonrpc"] = "2.0";
+            resp["id"] = request_id_to_json(rid);
+            resp["result"] = json::object();
+            transport_->deliver(resp);
+        }
+    });
+
+    bool errored_cb = false;
+    auto pr = client_->prepare(Protocol::METHOD_PING)
+                  .on_complete([](const json&) { throw std::runtime_error("boom"); })
+                  .on_error([&](const McpOutcome&) { errored_cb = true; })
+                  .timeout(std::chrono::seconds(5))
+                  .send();
+    // Must not hang and must not terminate.
+    EXPECT_NO_THROW(pr->get());
+    EXPECT_FALSE(errored_cb);
+}
+
+// Requests against a disconnected client fail fast with CLIENT_NOT_CONNECTED
+// instead of queueing into a dead transport.
+TEST_F(McpClientTest, RequestAfterDisconnectFailsFast) {
+    auto sr = client_->connect(std::chrono::seconds(5));
+    EXPECT_EQ(sr.server_info.name, "mock");
+    client_->disconnect();
+
+    EXPECT_THROW({ client_->ping(); }, McpException);
+    bool caught = false;
+    try {
+        client_->ping();
+    } catch (const McpException& e) {
+        caught = true;
+        EXPECT_EQ(e.code(), Protocol::CLIENT_NOT_CONNECTED);
+    }
+    EXPECT_TRUE(caught);
+}
+
+// Server push notifications reach registered callbacks.
+TEST_F(McpClientTest, ResourceUpdatedNotificationRoutesToHandler) {
+    auto sr = client_->connect(std::chrono::seconds(5));
+    EXPECT_EQ(sr.server_info.name, "mock");
+
+    std::mutex m;
+    std::condition_variable cv;
+    std::string got_uri;
+    client_->on_resource_updated([&](const std::string& uri) {
+        std::lock_guard<std::mutex> lock(m);
+        got_uri = uri;
+        cv.notify_all();
+    });
+    json notif;
+    notif["jsonrpc"] = "2.0";
+    notif["method"] = "notifications/resources/updated";
+    notif["params"] = json{{"uri", "file:///data"}};
+    transport_->deliver(notif);
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait_for(lock, std::chrono::seconds(3), [&] { return !got_uri.empty(); });
+    }
+    EXPECT_EQ(got_uri, "file:///data");
+}
+
+// The client refuses a server that negotiates an unknown protocolVersion
+// instead of continuing with mismatched assumptions.
+TEST_F(McpClientTest, UnsupportedNegotiatedVersionFailsHandshake) {
+    transport_->set_on_send([this](const json& m) {
+        if (m.contains("method") && m["method"] == "initialize" && m.contains("id")) {
+            RequestId rid = NullId{};
+            if (m["id"].is_number_integer()) rid = m["id"].get<int64_t>();
+            json resp = make_init_response(rid);
+            resp["result"]["protocolVersion"] = "1999-09-09";
+            transport_->deliver(resp);
+        }
+    });
+    EXPECT_THROW({ client_->connect(std::chrono::seconds(5)); }, McpException);
+}

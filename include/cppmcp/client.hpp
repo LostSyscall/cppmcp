@@ -58,11 +58,17 @@ using SamplingHandler = std::function<CreateMessageResult(const CreateMessageReq
 using ElicitationHandler = std::function<ElicitResult(const ElicitRequestParams&)>;
 using RootsHandler = std::function<ListRootsResult()>;
 using ClientDisconnectHandler = std::function<void()>;
+// Server-initiated notifications the client can observe.
+using ResourceUpdatedHandler = std::function<void(const std::string& uri)>;
+using ListChangedHandler = std::function<void(const std::string& list_kind)>;  // tools/resources/prompts
+using ServerLogHandler = std::function<void(const LoggingMessageNotificationParams& msg)>;
+using RootsChangedHandler = std::function<void()>;
 
 // High-performance async MCP client. Owns an io_context (or attaches to an
 // external one), serializes all internal state through a strand, and correlates
 // responses to outbound requests by id via std::promise/future.
 //
+// MUST be created via std::make_shared (internally uses shared_from_this()).
 // Multiple McpClient instances coexist freely; sharing one io_context across
 // them is safe because each has its own strand.
 class McpClient : public std::enable_shared_from_this<McpClient> {
@@ -83,13 +89,17 @@ public:
     // executor instead of inline on the client strand. Use a separate strand or
     // pool to keep slow user code off the I/O path.
     void set_callback_executor(asio::any_io_executor executor);
+    // Default per-request timeout applied when a request sets none (0 disables;
+    // useful to avoid a hung request blocking forever against a dead server).
+    void set_default_request_timeout(std::chrono::milliseconds t) { default_timeout_ = t; }
 
     void use_transport(std::shared_ptr<IClientTransport> transport);
 
     // --- lifecycle ---
     // Start the I/O thread (if self-owned), connect the transport, and perform
     // the initialize handshake. Blocks until the handshake completes or times
-    // out. Returns the server's InitializeResult.
+    // out. Returns the server's InitializeResult. May be called again after
+    // disconnect() to reconnect.
     InitializeResult connect(std::chrono::milliseconds timeout = std::chrono::seconds(30));
     // Non-blocking variant: returns the initialize PendingRequest.
     std::shared_ptr<PendingRequest> async_connect(std::chrono::milliseconds timeout = std::chrono::seconds(30));
@@ -112,14 +122,21 @@ public:
     void send_notification(const std::string& method, nlohmann::json params = nlohmann::json::object());
 
     // --- convenience synchronous wrappers (build + get) ---
-    std::vector<Tool> list_tools();
+    std::vector<Tool> list_tools(std::optional<std::string> cursor = std::nullopt,
+                                 std::string* next_cursor = nullptr);
     CallToolResult call_tool(const std::string& name, const nlohmann::json& arguments = nlohmann::json::object());
-    std::vector<Resource> list_resources();
+    std::vector<Resource> list_resources(std::optional<std::string> cursor = std::nullopt,
+                                         std::string* next_cursor = nullptr);
     ReadResourceResult read_resource(const std::string& uri);
-    std::vector<ResourceTemplate> list_resource_templates();
-    std::vector<Prompt> list_prompts();
+    std::vector<ResourceTemplate> list_resource_templates(std::optional<std::string> cursor = std::nullopt,
+                                                          std::string* next_cursor = nullptr);
+    std::vector<Prompt> list_prompts(std::optional<std::string> cursor = std::nullopt,
+                                     std::string* next_cursor = nullptr);
     GetPromptResult get_prompt(const std::string& name, const nlohmann::json& arguments = nlohmann::json::object());
     void set_logging_level(const std::string& level);
+    CompleteResult complete(const CompletionReference& ref, const CompletionArgument& argument);
+    void subscribe_resource(const std::string& uri);
+    void unsubscribe_resource(const std::string& uri);
     void ping();
 
     // --- server -> client handler registration ---
@@ -127,6 +144,12 @@ public:
     void register_elicitation_handler(ElicitationHandler handler);
     void register_roots_handler(RootsHandler handler);
     void on_disconnect(ClientDisconnectHandler handler);
+    // Server push notifications. Handlers run on the client strand (or the
+    // callback executor when set); keep them fast.
+    void on_resource_updated(ResourceUpdatedHandler handler);
+    void on_list_changed(ListChangedHandler handler);
+    void on_server_log(ServerLogHandler handler);
+    void on_roots_changed(RootsChangedHandler handler);
 
 private:
     friend class PendingRequest;
@@ -136,6 +159,7 @@ private:
     using work_guard_t = asio::executor_work_guard<asio::io_context::executor_type>;
 
     void init_owned_io();
+    void attach_transport_handlers();  // (re)arm transport callbacks; safe to call repeatedly
     void ensure_started();   // start io thread (self-owned) once
     void ensure_executor();  // lazily start worker pool if configured
 
@@ -148,6 +172,10 @@ private:
     void dispatch_inbound_request(JsonRpcRequest req, std::function<nlohmann::json(const nlohmann::json&)> run);
     void fail_all_pending(const std::string& reason);
     void on_transport_disconnect();
+    // Drain pending requests, preferring a strand post; falls back to a
+    // synchronous fail when no shared_ptr is obtainable (destruction) or the
+    // io loop is gone — avoids bad_weak_ptr from ~McpClient.
+    void drain_pending(const std::string& reason);
 
     // user-thread entry: allocates id, builds pr, posts registration to strand.
     std::shared_ptr<PendingRequest> submit_request(
@@ -166,11 +194,14 @@ private:
     void raw_send(nlohmann::json message);
 
     nlohmann::json make_initialize_params();
+    // Verify the server's negotiated protocolVersion is one we support.
+    void check_negotiated_version(const nlohmann::json& result);
 
     // config
     Implementation client_info_;
     ClientCapabilities capabilities_;
     std::size_t configured_workers_{0};
+    std::chrono::milliseconds default_timeout_{0};
 
     // io
     asio::io_context* io_ptr_{nullptr};
@@ -201,6 +232,10 @@ private:
     ElicitationHandler elicitation_handler_;
     RootsHandler roots_handler_;
     ClientDisconnectHandler disconnect_handler_;
+    ResourceUpdatedHandler resource_updated_handler_;
+    ListChangedHandler list_changed_handler_;
+    ServerLogHandler server_log_handler_;
+    RootsChangedHandler roots_changed_handler_;
 };
 
 } // namespace cppmcp

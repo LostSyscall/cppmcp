@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -28,9 +29,13 @@ public:
     Process(const Process&) = delete;
     Process& operator=(const Process&) = delete;
 
-    // Launch `executable` with `args`. On success the parent holds the write
-    // end of the child's stdin pipe and the read end of its stdout pipe.
-    void spawn(const std::string& executable, std::vector<std::string> args = {});
+    // Launch `executable` with `args`. `env` entries override (or add to) the
+    // parent environment; `working_dir` ("" = inherit) is the child's cwd. On
+    // success the parent holds the write end of the child's stdin pipe and the
+    // read end of its stdout pipe.
+    void spawn(const std::string& executable, std::vector<std::string> args = {},
+               const std::map<std::string, std::string>& env = {},
+               const std::string& working_dir = {});
 
 #ifdef _WIN32
     HANDLE stdin_write() const { return stdin_write_; }
@@ -43,11 +48,22 @@ public:
     // Close the parent's stdin write handle (signals EOF to the child).
     void close_stdin();
 
-    // Wait up to timeout_ms for the child to exit. Returns true if it exited
-    // (and was reaped, so terminate() becomes a no-op).
-    bool wait_for_exit(int timeout_ms);
+#ifdef _WIN32
+    // Relinquish ownership of the parent-side overlapped pipe handles so the
+    // caller (an asio stream_handle) owns them. After this, terminate() will
+    // NOT close them (the stream_handle is responsible).
+    void release_stdin() { stdin_write_ = nullptr; }
+    void release_stdout() { stdout_read_ = nullptr; }
+#endif
 
-    // Forcefully terminate the child and close all handles. Idempotent.
+    // Wait up to timeout_ms for the child to exit. Returns true if it exited
+    // (and was reaped, so terminate() becomes a no-op). exit_code() is valid
+    // after a true return.
+    bool wait_for_exit(int timeout_ms);
+    int exit_code() const;
+
+    // Forcefully terminate the child and close all handles. Idempotent. Never
+    // blocks indefinitely (escalates to SIGKILL / TerminateProcess).
     void terminate();
 
 private:
@@ -55,11 +71,13 @@ private:
     HANDLE child_process_ = nullptr;
     HANDLE stdin_write_ = nullptr;
     HANDLE stdout_read_ = nullptr;
+    HANDLE owned_null_handle_ = nullptr;  // stderr sink for GUI/service parents
 #else
     pid_t child_pid_ = -1;
     int stdin_fd_ = -1;
     int stdout_fd_ = -1;
 #endif
+    int exit_code_ = -1;
 };
 
 } // namespace cppmcp

@@ -45,7 +45,7 @@ struct JsonRpcErrorResponse {
 
 using JsonRpcResponse = std::variant<JsonRpcSuccessResponse, JsonRpcErrorResponse>;
 
-using ParsedMessage = std::variant<JsonRpcRequest, JsonRpcNotification, JsonRpcErrorResponse>;
+using ParsedMessage = std::variant<JsonRpcRequest, JsonRpcNotification, JsonRpcSuccessResponse, JsonRpcErrorResponse>;
 
 // Client-side parse result: unlike the server variant, a response (has id, no
 // method) is classified as Success/Error rather than treated as an error.

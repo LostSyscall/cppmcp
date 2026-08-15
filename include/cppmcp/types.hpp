@@ -23,6 +23,12 @@ struct ImageContent {
     std::string mime_type;
 };
 
+struct AudioContent {
+    std::string type = "audio";
+    std::string data;      // base64-encoded
+    std::string mime_type;
+};
+
 struct ResourceContents {
     std::string uri;
     std::string mime_type;
@@ -43,7 +49,7 @@ struct ResourceLink {
     std::optional<std::string> mime_type;
 };
 
-using Content = std::variant<TextContent, ImageContent, EmbeddedResource, ResourceLink>;
+using Content = std::variant<TextContent, ImageContent, AudioContent, EmbeddedResource, ResourceLink>;
 using ToolResultContent = Content;
 
 // --- Tool ---
@@ -70,12 +76,19 @@ struct CallToolResult {
 };
 
 // --- Resource ---
+// 2025-06-18 annotations: audience ("user"/"assistant") + priority [0,1].
+struct ResourceAnnotations {
+    std::optional<std::vector<std::string>> audience;
+    std::optional<double> priority;
+};
+
 struct Resource {
     std::string name;
     std::optional<std::string> title;
     std::string uri;
     std::optional<std::string> description;
     std::optional<std::string> mime_type;
+    std::optional<ResourceAnnotations> annotations;
 };
 
 struct ReadResourceResult {
@@ -218,9 +231,20 @@ struct SamplingMessage {
     Content content;
 };
 
+struct ModelHint {
+    std::optional<std::string> name;
+};
+
+struct ModelPreferences {
+    std::vector<ModelHint> hints;
+    std::optional<double> cost_priority;
+    std::optional<double> speed_priority;
+    std::optional<double> intelligence_priority;
+};
+
 struct CreateMessageRequestParams {
     std::vector<SamplingMessage> messages;
-    std::optional<std::string> model;
+    std::optional<ModelPreferences> model_preferences;
     std::optional<std::string> system_prompt;
     std::optional<std::string> include_context;  // "none" | "thisServer" | "allServers"
     std::optional<double> temperature;
@@ -268,6 +292,9 @@ void from_json(const nlohmann::json& j, TextContent& t);
 void to_json(nlohmann::json& j, const ImageContent& i);
 void from_json(const nlohmann::json& j, ImageContent& i);
 
+void to_json(nlohmann::json& j, const AudioContent& a);
+void from_json(const nlohmann::json& j, AudioContent& a);
+
 void to_json(nlohmann::json& j, const ResourceContents& r);
 void from_json(const nlohmann::json& j, ResourceContents& r);
 
@@ -285,6 +312,9 @@ void from_json(const nlohmann::json& j, Tool& t);
 
 void to_json(nlohmann::json& j, const CallToolResult& r);
 void from_json(const nlohmann::json& j, CallToolResult& r);
+
+void to_json(nlohmann::json& j, const ResourceAnnotations& ra);
+void from_json(const nlohmann::json& j, ResourceAnnotations& ra);
 
 void to_json(nlohmann::json& j, const Resource& r);
 void from_json(const nlohmann::json& j, Resource& r);
@@ -320,6 +350,7 @@ void to_json(nlohmann::json& j, const SamplingCapability& c);
 void to_json(nlohmann::json& j, const ElicitationCapability& c);
 void to_json(nlohmann::json& j, const RootsCapability& c);
 void to_json(nlohmann::json& j, const ClientCapabilities& c);
+void from_json(const nlohmann::json& j, ClientCapabilities& c);
 
 void to_json(nlohmann::json& j, const Implementation& impl);
 void from_json(const nlohmann::json& j, Implementation& impl);
@@ -333,6 +364,12 @@ void to_json(nlohmann::json& j, const Completion& c);
 void to_json(nlohmann::json& j, const CompleteResult& r);
 
 // Sampling / elicitation / roots (server -> client)
+void to_json(nlohmann::json& j, const ModelHint& h);
+void from_json(const nlohmann::json& j, ModelHint& h);
+
+void to_json(nlohmann::json& j, const ModelPreferences& p);
+void from_json(const nlohmann::json& j, ModelPreferences& p);
+
 void to_json(nlohmann::json& j, const SamplingMessage& m);
 void from_json(const nlohmann::json& j, SamplingMessage& m);
 
