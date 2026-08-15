@@ -73,8 +73,16 @@ jobs:
         run: |
           set -o pipefail
           ctest -E integration --output-on-failure -C ${{ matrix.build_type }} --timeout 120 2>&1 | tee ctest-unit.log | tail -40
-          echo "=== failing tests ==="
-          grep -E "FAILED|Failed" ctest-unit.log | head -20 || true
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            grep -E "^\s+[0-9]+ - " ctest-unit.log | head -20 | while read -r line; do
+              echo "::error::FAILED $line"
+            done
+            grep -B2 -A12 "Failed" ctest-unit.log | grep -vE "Passed|^--$" | head -80 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit $rc
+          fi
 
       - name: Integration tests
         working-directory: build
