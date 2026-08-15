@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  VCPKG_COMMIT: '2025.01.13'
+
 jobs:
   build-and-test:
     name: ${{ matrix.os }} / ${{ matrix.build_type }}
@@ -19,20 +22,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # vcpkg manifest mode + GitHub Actions cache for built dependencies.
+      - name: Setup vcpkg (clone + bootstrap)
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_INSTALLATION_ROOT/vcpkg" || true
+          cd "$VCPKG_INSTALLATION_ROOT/vcpkg"
+          # Pin to the baseline commit for reproducibility
+          git fetch --depth 1 origin $VCPKG_COMMIT && git checkout $VCPKG_COMMIT
+          ./bootstrap-vcpkg.sh -disableMetrics || ./bootstrap-vcpkg.bat -disableMetrics
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT/vcpkg" >> "$GITHUB_ENV"
+
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: |
-            ~/AppData/Local/vcpkg/archives
+            C:/vcpkg/archives
             ~/.cache/vcpkg/archives
-          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
-          restore-keys: vcpkg-${{ matrix.os }}-
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: '2025.01.13'
+          key: vcpkg-bin-${{ matrix.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-bin-${{ matrix.os }}-
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
@@ -70,16 +77,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Non-blocking while the tree is unformatted; flip to --Werror once
-      # clang-format has been applied in a dedicated pass.
+      # Report-only while the tree is unformatted; flip to --Werror once a
+      # dedicated formatting pass has landed.
       - name: Run clang-format (report only)
         run: |
-          find include src tests examples -name '*.hpp' -o -name '*.cpp' | \
-            xargs clang-format --dry-run 2>&1 | head -50 || true
-      - name: Count unformatted files
-        run: |
           COUNT=$(find include src tests examples -name '*.hpp' -o -name '*.cpp' | \
-            xargs clang-format --dry-run 2>/dev/null | grep -c '^' || true)
+            xargs -r clang-format --dry-run 2>&1 | grep -c '\[warning\]' || true)
           echo "clang-format findings: $COUNT"
 
   sanitizer:
@@ -88,17 +91,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup vcpkg (clone + bootstrap)
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git /opt/vcpkg
+          cd /opt/vcpkg
+          git fetch --depth 1 origin $VCPKG_COMMIT && git checkout $VCPKG_COMMIT
+          ./bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=/opt/vcpkg" >> "$GITHUB_ENV"
+
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/vcpkg/archives
-          key: vcpkg-ubuntu-asan-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
-          restore-keys: vcpkg-ubuntu-asan-
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: '2025.01.13'
+          key: vcpkg-bin-ubuntu-asan-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-bin-ubuntu-
 
       - name: Configure (sanitizers)
         run: >
