@@ -1,11 +1,21 @@
 # Stage 1: Build with vcpkg dependencies
 FROM ubuntu:22.04 AS build
 
+# Optional build-time proxy for vcpkg/git fetches (empty = direct access):
+#   docker build --build-arg HTTP_PROXY=http://host.docker.internal:10808 ...
+# Optional apt mirror override (default: Tsinghua for CN networks):
+#   docker build --build-arg APT_MIRROR=http://archive.ubuntu.com ...
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
+ARG APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn
+
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Use Tsinghua mirror for apt (HTTP — ca-certificates not yet installed)
-RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list \
-    && sed -i 's|http://security.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+# Mirror only when it is not the default upstream host
+RUN MIRROR="${APT_MIRROR}" \
+    && if [ "$MIRROR" != "http://archive.ubuntu.com" ]; then \
+        sed -i "s|http://archive.ubuntu.com|$MIRROR|g; s|http://security.ubuntu.com|$MIRROR|g" /etc/apt/sources.list; \
+    fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++-11 \
@@ -22,9 +32,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV CXX=g++-11
 ENV CC=gcc-11
-# Proxy for vcpkg's curl (git uses host network directly with --network=host)
-ENV HTTP_PROXY=http://host.docker.internal:10808
-ENV HTTPS_PROXY=http://host.docker.internal:10808
 
 # Fix network instability: force HTTP/1.1 and increase buffer
 RUN git config --global http.version HTTP/1.1 \

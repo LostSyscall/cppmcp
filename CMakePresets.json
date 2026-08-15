@@ -1,0 +1,76 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vcpkg-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "CPPMCP_BUILD_TESTS": "ON",
+        "CPPMCP_BUILD_INTEGRATION_TESTS": "ON",
+        "CPPMCP_BUILD_EXAMPLES": "ON"
+      }
+    },
+    {
+      "name": "vs2019-debug",
+      "displayName": "VS2019 x64 Debug (vcpkg)",
+      "inherits": "vcpkg-base",
+      "generator": "Visual Studio 16 2019",
+      "architecture": "x64",
+      "toolset": "host=x64",
+      "cacheVariables": {
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDebugDLL"
+      }
+    },
+    {
+      "name": "vs2019-release",
+      "displayName": "VS2019 x64 Release (vcpkg)",
+      "inherits": "vcpkg-base",
+      "generator": "Visual Studio 16 2019",
+      "architecture": "x64",
+      "toolset": "host=x64",
+      "cacheVariables": {
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL"
+      }
+    },
+    {
+      "name": "ninja-debug",
+      "displayName": "Ninja Debug (vcpkg)",
+      "inherits": "vcpkg-base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vs2019-debug",
+      "configurePreset": "vs2019-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vs2019-release",
+      "configurePreset": "vs2019-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "ninja-debug",
+      "configurePreset": "ninja-debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "vs2019-debug",
+      "configurePreset": "vs2019-debug",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

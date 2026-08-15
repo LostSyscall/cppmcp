@@ -1,0 +1,22 @@
+# Normalize line endings: LF in the repo, checkout as-is (Windows devs get
+# whatever git's core.autocrlf gives them, but diffs stay clean).
+* text=auto
+
+*.cpp text
+*.hpp text
+*.h text
+*.c text
+*.cmake text
+*.md text
+*.json text
+*.yml text
+*.yaml text
+
+# Windows scripts need CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary
+*.png binary
+*.jpg binary
+*.ico binary

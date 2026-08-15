@@ -1,7 +1,7 @@
 # cppmcp — C++ MCP Server & Client Library
 **[中文](docs/zh-CN/README.md)**
 
-A C++ implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) **server and client**, conforming to MCP specification version `2025-03-26`. The server supports four transport modes (stdio, SSE, Streamable HTTP, local pipe). The client connects via stdio (spawn child process), Streamable HTTP, or local pipe. All communication uses JSON-RPC 2.0.
+A C++ implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) **server and client**, conforming to MCP specification versions `2025-03-26` and `2025-06-18` (negotiated per connection). The server supports four transport modes (stdio, SSE, Streamable HTTP, local pipe). The client connects via stdio (spawn child process), Streamable HTTP, or local pipe. All communication uses JSON-RPC 2.0.
 
 
 ## Features
@@ -9,15 +9,41 @@ A C++ implementation of the [Model Context Protocol (MCP)](https://modelcontextp
 - **Server: four transport modes** — stdio, SSE (legacy HTTP), Streamable HTTP, local pipe
 - **Client: three transport modes** — stdio (spawn a child server process), Streamable HTTP, local pipe
 - **Fully async I/O**: asio unified event loop + llhttp HTTP parser, zero thread kidnapping, zero polling
-- **Full MCP protocol (server)**: Tools, Resources, Prompts, Completions, Logging
-- **Full MCP client**: list/call tools, read resources, get prompts, ping; handles server→client `sampling`/`elicitation`/`roots` and auto-answers `ping`
+- **Full MCP protocol (server)**: Tools, Resources (+ URI templates, subscriptions), Prompts, Completions, Logging, pagination; inputSchema/param validation
+- **Server → client requests**: `request_sampling()` / `request_elicitation()` / `request_roots()` with capability gating
+- **Full MCP client**: list/call tools, read resources (subscribe/unsubscribe), get prompts, completion, ping; handles server→client `sampling`/`elicitation`/`roots`, auto-answers `ping`, receives push notifications (`resources/updated`, `list_changed`, log messages) — including over HTTP via the GET SSE stream
 - **Dual-form client API**: fluent `RequestBuilder` with `on_complete`/`on_error`/`on_progress` + `std::future` (`PendingRequest::get()`), plus blocking convenience wrappers (`call_tool`, `list_tools`, ...)
 - **Progress reporting**: real-time progress notifications during tool calls
 - **High concurrency**: each `McpClient` owns an `asio::strand`; multiple clients coexist or share one `io_context`
 - **Cross-platform**: Windows (MSVC 2019+) and Linux (GCC 11+)
 - **C++17**: no advanced feature dependencies, VS2019 compatible
 - **Lightweight deps**: only nlohmann-json, asio, llhttp
-- **Full test coverage**: 45 unit tests + 29 real I/O integration tests (73 total), verified on Windows & Linux
+- **Hardened**: protocol-version negotiation, progressToken echo, exception-isolated user callbacks, fail-fast disconnects, bounded shutdown paths
+- **Full test coverage**: 63 unit tests + 29 real I/O integration tests (92 total), verified on Windows & Linux (CI: MSVC + GCC, ASan/UBSan)
+
+## Installation (consume as a package)
+
+Build once, install, then consume from another CMake project via `find_package`:
+
+```bash
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+cmake --build build --config Release
+cmake --install build --prefix /your/prefix --config Release
+```
+
+This installs three libraries (`cppmcp_common`, `cppmcp_server`, `cppmcp_client`),
+the headers under `include/cppmcp/`, and a config package under
+`lib/cmake/cppmcp/`. In the consuming project:
+
+```cmake
+find_package(cppmcp 0.2 REQUIRED COMPONENTS server client)
+target_link_libraries(my_app PRIVATE cppmcp::cppmcp_server cppmcp::cppmcp_client)
+```
+
+`cppmcp_common` (and the asio/llhttp/nlohmann-json dependencies it carries)
+come in transitively. Note: the exported `find_dependency(asio CONFIG)` assumes
+dependencies were installed by vcpkg/conan — building asio from a source
+tarball (which ships no CMake config package) is not supported by the export.
 
 ## Quick Start
 
@@ -30,7 +56,7 @@ A C++ implementation of the [Model Context Protocol (MCP)](https://modelcontextp
 ### Install Dependencies
 
 ```bash
-git clone https://github.com/your-org/cppmcp.git
+git clone https://github.com/LostSyscall/cppmcp.git
 cd cppmcp
 vcpkg install
 ```
@@ -406,9 +432,9 @@ High-performance local inter-process communication:
 
 ## Testing
 
-The project contains 73 Google Test tests across two tiers:
+The project contains 92 Google Test tests across two tiers:
 
-### Unit Tests (45)
+### Unit Tests (63)
 
 Using TestTransport / TestClientTransport mocks (no real I/O):
 
@@ -416,7 +442,8 @@ Using TestTransport / TestClientTransport mocks (no real I/O):
 - MCP type serialization (9)
 - Server core logic (8)
 - Integration: Resources, Prompts, notifications (9)
-- Client core (9): outbound response correlation, error→throw, timeout, cancel, progress routing, shutdown-fails-pending, inbound roots/sampling dispatch, ping auto-answer
+- Client core (14): outbound response correlation, error→throw, timeout, cancel, progress routing, shutdown-fails-pending, inbound roots/sampling dispatch, ping auto-answer, reconnect, callback exception isolation, fail-fast when disconnected, notification routing, unsupported-version handshake
+- Protocol conformance (14): version negotiation, parameter type errors → -32602, inputSchema/required-argument validation, completion crash vectors, setLevel enum, progressToken echo, resource template matching, subscribe capability gating + per-session routing, pagination, null-id rejection
 
 ### Integration Tests (29)
 

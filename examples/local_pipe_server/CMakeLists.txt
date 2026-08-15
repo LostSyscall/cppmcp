@@ -1,2 +1,2 @@
 add_executable(local_pipe_server main.cpp)
-target_link_libraries(local_pipe_server PRIVATE cppmcp_lib)
+target_link_libraries(local_pipe_server PRIVATE cppmcp_server)

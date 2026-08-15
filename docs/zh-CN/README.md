@@ -1,6 +1,6 @@
 # cppmcp — C++ MCP 服务器与客户端库
 
-C++ 实现的 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/) **服务器与客户端**库，符合 MCP 协议规范 `2025-03-26` 版本。服务器支持四种传输模式：标准输入输出（stdio）、SSE、Streamable HTTP、本地管道（Windows Named Pipe / Unix Domain Socket）；客户端支持三种连接方式：stdio（拉起子进程）、Streamable HTTP、本地管道。全部使用 JSON-RPC 2.0 进行协议通信。
+C++ 实现的 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/) **服务器与客户端**库，符合 MCP 协议规范 `2025-03-26` 与 `2025-06-18`（按连接协商）。服务器支持四种传输模式：标准输入输出（stdio）、SSE、Streamable HTTP、本地管道（Windows Named Pipe / Unix Domain Socket）；客户端支持三种连接方式：stdio（拉起子进程）、Streamable HTTP、本地管道。全部使用 JSON-RPC 2.0 进行协议通信。
 
 ## 特性
 
@@ -15,7 +15,8 @@ C++ 实现的 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/
 - **跨平台**：Windows（MSVC 2019+）与 Linux（GCC 11+）
 - **C++17**：无依赖高级特性，兼容 VS2019
 - **轻量依赖**：仅 nlohmann-json、asio、llhttp
-- **完整测试**：45 单元测试 + 29 真实 I/O 集成测试（共 73 个），Windows/Linux 双平台验证
+- **协议加固**：版本协商、progressToken 回显、用户回调异常隔离、断连快速失败、有界关闭路径
+- **完整测试**：63 单元测试 + 29 真实 I/O 集成测试（共 92 个），Windows/Linux 双平台验证（CI：MSVC + GCC，ASan/UBSan）
 
 ## 快速开始
 
@@ -29,7 +30,7 @@ C++ 实现的 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/
 
 ```bash
 # 克隆项目
-git clone https://github.com/your-org/cppmcp.git
+git clone https://github.com/LostSyscall/cppmcp.git
 cd cppmcp
 
 # vcpkg 安装依赖（需要设置 VCPKG_ROOT）
@@ -92,7 +93,7 @@ cppmcp/
 │   ├── local_pipe_server/     # 本地管道模式示例
 │   └── client_demo/           # McpClient ↔ 本地管道服务器 端到端示例
 ├── tests/                   # 单元与集成测试
-│   ├── test_*.cpp           # 45 个单元测试（含 test_client.cpp mock）
+│   ├── test_*.cpp           # 63 个单元测试（含 test_client.cpp mock 与 test_protocol_conformance.cpp）
 │   └── integration/         # 29 个真实 I/O 集成测试（含 McpClient）
 │       ├── test_local_pipe_transport.cpp   # LocalPipe 真实连接测试
 │       ├── test_streamable_http_transport.cpp # HTTP POST 真实请求测试

@@ -1,2 +1,2 @@
 add_executable(minimal_http_test main.cpp)
-target_link_libraries(minimal_http_test PRIVATE cppmcp_lib)
+target_link_libraries(minimal_http_test PRIVATE cppmcp_server)

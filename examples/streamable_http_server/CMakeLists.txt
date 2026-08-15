@@ -1,2 +1,2 @@
 add_executable(streamable_http_server main.cpp)
-target_link_libraries(streamable_http_server PRIVATE cppmcp_lib)
+target_link_libraries(streamable_http_server PRIVATE cppmcp_server)

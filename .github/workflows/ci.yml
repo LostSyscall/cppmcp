@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  VCPKG_BINARY_SOURCES: clear;nuget,GitHub,readwrite
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        compiler: [msvc, gcc]
+        build_type: [Debug, Release]
+        exclude:
+          - os: windows-latest
+            compiler: gcc
+          - os: ubuntu-latest
+            compiler: msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export GitHub Packages access token
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Setup vcpkg (binary caching via GitHub Packages)
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2025.01.13'
+
+      - name: Configure (MSVC)
+        if: matrix.compiler == 'msvc'
+        run: >
+          cmake -B build
+          -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+          -DCPPMCP_BUILD_TESTS=ON
+          -DCPPMCP_BUILD_INTEGRATION_TESTS=ON
+          -DCPPMCP_BUILD_EXAMPLES=ON
+
+      - name: Configure (GCC)
+        if: matrix.compiler == 'gcc'
+        run: >
+          cmake -B build
+          -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCPPMCP_BUILD_TESTS=ON
+          -DCPPMCP_BUILD_INTEGRATION_TESTS=ON
+          -DCPPMCP_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      - name: Unit tests
+        working-directory: build
+        run: ctest -E integration --output-on-failure -C ${{ matrix.build_type }} --timeout 120
+
+      - name: Integration tests
+        working-directory: build
+        run: ctest -L integration --output-on-failure -C ${{ matrix.build_type }} --timeout 180
+
+  format-check:
+    name: clang-format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clang-format
+        run: |
+          find include src tests examples -name '*.hpp' -o -name '*.cpp' | \
+            xargs clang-format --dry-run --Werror
+
+  sanitizer:
+    name: ubuntu / ASan+UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export GitHub Packages access token
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Setup vcpkg (binary caching via GitHub Packages)
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2025.01.13'
+
+      - name: Configure (sanitizers)
+        run: >
+          cmake -B build
+          -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'
+          -DCPPMCP_BUILD_TESTS=ON
+          -DCPPMCP_BUILD_INTEGRATION_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Unit tests (sanitized)
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest -E integration --output-on-failure --timeout 300
