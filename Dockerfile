@@ -51,6 +51,7 @@ RUN bash -c 'for i in 1 2 3; do /opt/vcpkg/vcpkg install --triplet x64-linux && 
 
 # Copy project source
 COPY CMakeLists.txt ./
+COPY cmake/ cmake/
 COPY src/ src/
 COPY include/ include/
 COPY tests/ tests/

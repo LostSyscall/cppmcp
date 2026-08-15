@@ -631,7 +631,8 @@ void McpClient::drain_pending(const std::string& reason) {
         f.get();
     } else {
         // External io: best-effort wait; the owner must keep it running.
-        if (f.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        // Bounded so shutdown() cannot hang the caller on a stalled loop.
+        if (f.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
             f.get();
         }
     }

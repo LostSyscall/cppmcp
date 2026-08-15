@@ -91,8 +91,8 @@ public:
         });
     }
 
-    // Wait for a response by id
-    json read_response(int expected_id, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+    // Wait for a response by id (generous default: CI runners have slow I/O)
+    json read_response(int expected_id, std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             std::lock_guard<std::mutex> lock(responses_mutex_);

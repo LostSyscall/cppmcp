@@ -30,7 +30,7 @@ jobs:
           fi
           git clone https://github.com/microsoft/vcpkg.git "$VCPKG_DIR"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            "$VCPKG_DIR/bootstrap-vcpkg.bat" -disableMetrics
+            cd "$VCPKG_DIR" && cmd //c "bootstrap-vcpkg.bat -disableMetrics"
           else
             "$VCPKG_DIR/bootstrap-vcpkg.sh" -disableMetrics
           fi
@@ -47,10 +47,10 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         run: >
-          cmake -B build
-          -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+          cmake -B build -A x64
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DCPPMCP_BUILD_TESTS=ON
           -DCPPMCP_BUILD_INTEGRATION_TESTS=ON
           -DCPPMCP_BUILD_EXAMPLES=ON
