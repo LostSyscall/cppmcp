@@ -598,40 +598,38 @@ void McpClient::dispatch_inbound_request(JsonRpcRequest req, std::function<nlohm
 // io loop), fall back to a synchronous fail. This avoids bad_weak_ptr from
 // shared_from_this() when stop()/disconnect() runs from ~McpClient.
 void McpClient::drain_pending(const std::string& reason) {
-    if (stopping_.load() || !io_ptr_) {
-        // Already stopped / never started — fail inline if anything is pending.
-        connected_.store(false);
-        fail_all_pending(reason);
-        return;
-    }
-    // Inline-drain when we ARE on a strand/io thread: blocking on a posted
-    // task here would deadlock the only thread that can run it. This covers
-    // both the self-owned io thread and an external io thread that is
-    // currently executing our strand (e.g. a user callback calling stop()).
+    // INLINE fail is legal ONLY on the strand/io thread or when the io loop is
+    // gone (never started / destructing). A user thread (including stop())
+    // must run fail_all_pending ON THE STRAND — pending_map_ is strand-private
+    // and an inline fail races with a concurrent register_pending posted from
+    // submit_request (observed as a rare hang of ShutdownFailsPending).
+    bool io_loop_gone = !io_ptr_ ||
+                        (owns_io_context_ && !io_thread_.joinable() && !running_.load());
     bool on_io_thread = (owns_io_context_ && io_thread_.joinable() &&
                          std::this_thread::get_id() == io_thread_.get_id()) ||
-                        strand_->running_in_this_thread();
-    if (on_io_thread) {
+                        (strand_ && strand_->running_in_this_thread());
+    if (io_loop_gone || on_io_thread) {
         connected_.store(false);
         fail_all_pending(reason);
         return;
     }
     auto self = weak_from_this().lock();
-    std::promise<void> drained;
-    auto f = drained.get_future();
-    if (self) {
-        asio::post(*strand_, [self, &drained, &reason]() {
-            self->connected_.store(false);
-            self->fail_all_pending(reason);
-            drained.set_value();
-        });
-    } else {
+    if (!self) {
         // Destructing: cannot post (io loop may be gone). Fail inline.
         connected_.store(false);
         fail_all_pending(reason);
         return;
     }
+    std::promise<void> drained;
+    auto f = drained.get_future();
+    asio::post(*strand_, [self, &drained, &reason]() {
+        self->connected_.store(false);
+        self->fail_all_pending(reason);
+        drained.set_value();
+    });
     if (owns_io_context_) {
+        // The io thread stays alive until stop() resets the work guard, so
+        // this wait always completes.
         f.get();
     } else {
         // External io: best-effort wait; the owner must keep it running.
