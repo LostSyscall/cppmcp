@@ -180,6 +180,20 @@ void StdioClientTransport::handle_line(const std::string& line) {
 }
 
 void StdioClientTransport::do_read() {
+    // Cap BEFORE arming async_read_until: without this, a peer sending data
+    // with no '\n' grows read_buf_ unboundedly (the post-hoc line-size check
+    // in on_read fires too late to bound memory).
+    if (read_buf_.size() > max_line_size_) {
+        if (error_handler_) error_handler_("stdio inbound line exceeds size cap, dropping connection");
+        connected_.store(false);
+        if (disconnect_handler_ && io_ctx_) {
+            auto self = shared_from_this();
+            asio::post(*io_ctx_, [self]() {
+                if (self->disconnect_handler_) self->disconnect_handler_();
+            });
+        }
+        return;
+    }
 #ifdef _WIN32
     if (!stdout_handle_ || stopping_.load()) {
         return;

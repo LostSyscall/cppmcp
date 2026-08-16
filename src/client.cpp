@@ -54,6 +54,10 @@ void McpClient::set_callback_executor(asio::any_io_executor executor) {
 }
 
 void McpClient::use_transport(std::shared_ptr<IClientTransport> transport) {
+    if (running_.load()) {
+        AsyncLogger::instance().log("McpClient: use_transport ignored - client already started");
+        return;
+    }
     transport_ = std::move(transport);
 }
 
