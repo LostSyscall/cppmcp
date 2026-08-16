@@ -76,7 +76,7 @@ cmake --build build
 
 ```bash
 # Unit tests only (fast)
-cd build && ctest -E integration --output-on-failure
+cd build && ctest -LE integration --output-on-failure
 
 # Integration tests (real I/O, slower)
 cmake -B build -DCPPMCP_BUILD_INTEGRATION_TESTS=ON ...

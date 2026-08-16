@@ -445,7 +445,7 @@ MCP 协议推荐的 HTTP 模式。单端点架构：
 # 单元测试
 cmake -B build -DCPPMCP_BUILD_TESTS=ON -DCMAKE_TOOLCHAIN_FILE=...
 cmake --build build
-cd build && ctest -E integration --output-on-failure
+cd build && ctest -LE integration --output-on-failure
 
 # 集成测试（需要真实 I/O，耗时较长）
 cmake -B build -DCPPMCP_BUILD_TESTS=ON -DCPPMCP_BUILD_INTEGRATION_TESTS=ON -DCMAKE_TOOLCHAIN_FILE=...
