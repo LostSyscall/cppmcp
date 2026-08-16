@@ -531,18 +531,19 @@ TEST(StreamableHttpMultiThreadTest, ConcurrentClientsNoCorruption) {
     for (int i = 0; i < kClients; ++i) {
         clients.emplace_back([&, i]() {
             HttpClient c;
-            auto init = c.post_and_parse("127.0.0.1", port, "/mcp", make_initialize_request(1));
+            auto init = c.post_and_parse("127.0.0.1", port, "/mcp", make_initialize_request(1), {}, std::chrono::seconds(15));
             if (init.status != 200) { ++errors; return; }
             std::string sid = init.headers.count("mcp-session-id") ? init.headers["mcp-session-id"] : "";
             std::map<std::string, std::string> sh;
             if (!sid.empty()) sh["mcp-session-id"] = sid;
-            c.post_and_parse("127.0.0.1", port, "/mcp", make_initialized_notification(), sh);
+            c.post_and_parse("127.0.0.1", port, "/mcp", make_initialized_notification(), sh, std::chrono::seconds(15));
 
             for (int j = 0; j < kPerClient; ++j) {
                 int id = i * 100 + j;
                 std::string msg = "c" + std::to_string(id);
                 auto resp = c.post_and_parse("127.0.0.1", port, "/mcp",
-                    make_tools_call_request(id, "slow_echo", nlohmann::json{{"message", msg}}), sh);
+                    make_tools_call_request(id, "slow_echo", nlohmann::json{{"message", msg}}), sh,
+                    std::chrono::seconds(15));
                 if (resp.status != 200) { ++errors; continue; }
                 try {
                     auto body = nlohmann::json::parse(resp.body);

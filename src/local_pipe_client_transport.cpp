@@ -96,8 +96,16 @@ void LocalPipeClientTransport::connect() {
 #else
     socket_ = std::make_unique<asio::local::stream_protocol::socket>(*io_ctx_);
     asio::local::stream_protocol::endpoint ep(resolve_path());
+    // Mirror the Windows retry loop: the server may not have bound+listened
+    // yet when the client connects (slow machines / racing startup).
     asio::error_code ec;
-    socket_->connect(ep, ec);
+    for (int i = 0; i < 100; ++i) {
+        socket_->connect(ep, ec);
+        if (!ec) break;
+        // ENOENT: socket file not created yet; ECONNREFUSED: exists but not
+        // listening. Both are transient during server startup.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     if (ec) {
         connected_.store(false);
         socket_.reset();

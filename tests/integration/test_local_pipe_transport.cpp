@@ -58,7 +58,17 @@ public:
 #else
         std::string path = "/tmp/" + pipe_name_ + ".sock";
         asio::local::stream_protocol::endpoint ep(path);
-        socket_->connect(ep);
+        // Retry like the Windows branch: on a slow/loaded runner the server
+        // may not have bound+listened yet when the client connects.
+        asio::error_code cec;
+        for (int i = 0; i < 100; ++i) {
+            socket_->connect(ep, cec);
+            if (!cec) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (cec) {
+            throw std::runtime_error("Failed to connect to unix socket: " + path + " (" + cec.message() + ")");
+        }
 #endif
         start_read();
     }
