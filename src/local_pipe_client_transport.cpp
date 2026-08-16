@@ -109,7 +109,7 @@ void LocalPipeClientTransport::connect() {
         }
         socket_->connect(ep, ec);
         if (!ec) break;
-        if (ec == asio::error::no_such_file_or_directory ||
+        if (ec == std::errc::no_such_file_or_directory ||
             ec == asio::error::connection_refused) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
