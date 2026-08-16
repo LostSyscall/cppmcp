@@ -180,12 +180,36 @@ void StdioClientTransport::handle_line(const std::string& line) {
 }
 
 void StdioClientTransport::do_read() {
-    // Cap BEFORE arming async_read_until: without this, a peer sending data
-    // with no '\n' grows read_buf_ unboundedly (the post-hoc line-size check
-    // in on_read fires too late to bound memory).
+    // Belt-and-suspenders with the streambuf max_size: drop the connection
+    // when an undelivered prefix exceeds the cap. Closing the handles matters
+    // — without it the peer sees a half-open connection and blocks forever
+    // writing into it.
     if (read_buf_.size() > max_line_size_) {
         if (error_handler_) error_handler_("stdio inbound line exceeds size cap, dropping connection");
         connected_.store(false);
+        stopping_.store(true);
+        if (write_queue_) {
+            write_queue_->shutdown();
+        }
+#ifdef _WIN32
+        if (stdout_handle_) {
+            asio::error_code ec;
+            stdout_handle_->close(ec);
+        }
+        if (stdin_handle_) {
+            asio::error_code ec;
+            stdin_handle_->close(ec);
+        }
+#else
+        if (stdout_desc_) {
+            asio::error_code ec;
+            stdout_desc_->close(ec);
+        }
+        if (stdin_desc_) {
+            asio::error_code ec;
+            stdin_desc_->close(ec);
+        }
+#endif
         if (disconnect_handler_ && io_ctx_) {
             auto self = shared_from_this();
             asio::post(*io_ctx_, [self]() {

@@ -39,7 +39,7 @@ struct PipeConnection : std::enable_shared_from_this<PipeConnection> {
     asio::local::stream_protocol::socket socket;
 #endif
     asio::strand<asio::any_io_executor> strand_;
-    asio::streambuf read_buf;
+    asio::streambuf read_buf{64 * 1024 * 1024};  // hard cap; watermark check drops oversized peers first
     std::shared_ptr<AsyncWriteQueue> write_queue;
     std::atomic<bool> active{true};
     int connection_id = 0;

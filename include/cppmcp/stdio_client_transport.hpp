@@ -76,10 +76,14 @@ private:
     std::unique_ptr<asio::posix::stream_descriptor> stdin_desc_;
     std::unique_ptr<asio::posix::stream_descriptor> stdout_desc_;
 #endif
-    asio::streambuf read_buf_;
-    std::shared_ptr<AsyncWriteQueue> write_queue_;
-
+    // Bounded buffer: async_read_until has no mid-read callback point, so a
+    // peer streaming newline-less data would otherwise grow it unboundedly.
+    // Headroom (line cap + 1 MiB) keeps the do_read() watermark check ahead
+    // of the streambuf hard limit, whose violation throws std::length_error
+    // from inside asio (which would terminate the io thread).
     static constexpr std::size_t max_line_size_ = 16 * 1024 * 1024;
+    asio::streambuf read_buf_{max_line_size_ + 1024 * 1024};
+    std::shared_ptr<AsyncWriteQueue> write_queue_;
 };
 
 } // namespace cppmcp

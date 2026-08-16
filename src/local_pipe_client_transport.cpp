@@ -96,15 +96,25 @@ void LocalPipeClientTransport::connect() {
 #else
     socket_ = std::make_unique<asio::local::stream_protocol::socket>(*io_ctx_);
     asio::local::stream_protocol::endpoint ep(resolve_path());
-    // Mirror the Windows retry loop: the server may not have bound+listened
-    // yet when the client connects (slow machines / racing startup).
+    // Mirror the Windows retry loop, but ONLY for transient startup errors:
+    // ENOENT (socket file not created yet) and ECONNREFUSED (exists but not
+    // listening). Permanent errors fail fast so a misconfigured path does
+    // not block connect() for 5 seconds.
     asio::error_code ec;
     for (int i = 0; i < 100; ++i) {
+        if (stopping_.load()) {
+            connected_.store(false);
+            socket_.reset();
+            return;
+        }
         socket_->connect(ep, ec);
         if (!ec) break;
-        // ENOENT: socket file not created yet; ECONNREFUSED: exists but not
-        // listening. Both are transient during server startup.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (ec == asio::error::no_such_file_or_directory ||
+            ec == asio::error::connection_refused) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        break;  // permanent error
     }
     if (ec) {
         connected_.store(false);
@@ -194,12 +204,27 @@ void LocalPipeClientTransport::handle_line(const std::string& line) {
 }
 
 void LocalPipeClientTransport::do_read() {
-    // Cap BEFORE arming async_read_until: without this, a peer sending data
-    // with no '\n' grows read_buf_ unboundedly (the post-hoc line-size check
-    // fires too late to bound memory).
+    // Belt-and-suspenders with the streambuf max_size: drop the connection
+    // when an undelivered prefix exceeds the cap, closing the handle so the
+    // peer does not write into a half-open connection forever.
     if (read_buf_.size() > max_line_size_) {
         if (error_handler_) error_handler_("pipe inbound line exceeds size cap, dropping connection");
         connected_.store(false);
+        stopping_.store(true);
+        if (write_queue_) {
+            write_queue_->shutdown();
+        }
+#ifdef _WIN32
+        if (handle_) {
+            asio::error_code ec;
+            handle_->close(ec);
+        }
+#else
+        if (socket_) {
+            asio::error_code ec;
+            socket_->close(ec);
+        }
+#endif
         if (disconnect_handler_ && io_ctx_) {
             auto self = shared_from_this();
             asio::post(*io_ctx_, [self]() {

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -65,6 +66,12 @@ private:
     void arm_read_timer();
     void clear_handlers();
     std::string build_post_request(std::string body) const;
+    // session_id_ is written by the io thread (response headers) and cleared
+    // by the user thread (disconnect) — every access takes session_mutex_.
+    std::string session_id_snapshot() const {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        return session_id_;
+    }
 
     std::string host_;
     uint16_t port_;
@@ -96,6 +103,7 @@ private:
     int response_status_{0};
     bool message_complete_{false};
     std::string session_id_;
+    mutable std::mutex session_mutex_;
     std::size_t max_body_size_{16 * 1024 * 1024};  // cap response body (client-side DoS guard)
 };
 

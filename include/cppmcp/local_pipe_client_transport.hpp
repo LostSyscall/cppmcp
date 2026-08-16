@@ -54,10 +54,10 @@ private:
 #else
     std::unique_ptr<asio::local::stream_protocol::socket> socket_;
 #endif
-    asio::streambuf read_buf_;
-    std::shared_ptr<AsyncWriteQueue> write_queue_;
-
+    // Bounded buffer (see StdioClientTransport for the rationale/headroom).
     static constexpr std::size_t max_line_size_ = 16 * 1024 * 1024;
+    asio::streambuf read_buf_{max_line_size_ + 1024 * 1024};
+    std::shared_ptr<AsyncWriteQueue> write_queue_;
 };
 
 } // namespace cppmcp

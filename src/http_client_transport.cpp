@@ -84,6 +84,7 @@ void HttpClientTransport::flush_header() {
     for (auto& c : field) c = static_cast<char>(tolower(c));
     response_headers_[field] = cur_header_value_;
     if (field == "mcp-session-id" && !cur_header_value_.empty()) {
+        std::lock_guard<std::mutex> lock(session_mutex_);
         session_id_ = cur_header_value_;
     }
     cur_header_field_.clear();
@@ -133,12 +134,17 @@ void HttpClientTransport::disconnect() {
     // do NOT wait for the response — a keep-alive server may never close the
     // connection, and blocking here would hang the caller (observed as a
     // deadlock when the server keeps the POST socket open after 200).
-    if (connected_.load() && !session_id_.empty() && socket_ && socket_->is_open()) {
+    std::string sid_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        sid_snapshot = session_id_;
+    }
+    if (connected_.load() && !sid_snapshot.empty() && socket_ && socket_->is_open()) {
         try {
             asio::error_code ec;
             std::string req = "DELETE " + endpoint_ + " HTTP/1.1\r\n";
             req += "Host: " + host_ + ":" + std::to_string(port_) + "\r\n";
-            req += "Mcp-Session-Id: " + session_id_ + "\r\n";
+            req += "Mcp-Session-Id: " + sid_snapshot + "\r\n";
             req += "Connection: close\r\n\r\n";
             asio::write(*socket_, asio::buffer(req), ec);
         } catch (const std::exception&) {
@@ -156,7 +162,10 @@ void HttpClientTransport::disconnect() {
         asio::error_code ec;
         socket_->close(ec);
     }
-    session_id_.clear();  // a reconnect must negotiate a fresh session
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        session_id_.clear();  // a reconnect must negotiate a fresh session
+    }
     // Defer clearing handlers so the in-flight read completion (triggered by
     // socket close above) can still invoke disconnect_handler_. Posting keeps
     // this transport alive (via captured self) until the io loop runs it.
@@ -180,8 +189,13 @@ std::string HttpClientTransport::build_post_request(std::string body) const {
     req += "Content-Type: application/json\r\n";
     req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     req += "Accept: application/json, text/event-stream\r\n";
-    if (!session_id_.empty()) {
-        req += "Mcp-Session-Id: " + session_id_ + "\r\n";
+    std::string sid;
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        sid = session_id_;
+    }
+    if (!sid.empty()) {
+        req += "Mcp-Session-Id: " + sid + "\r\n";
     }
     for (const auto& [k, v] : extra_headers_) {
         req += k + ": " + v + "\r\n";
@@ -277,7 +291,7 @@ void HttpClientTransport::handle_response() {
         if (is_sse) {
             handle_sse_frame("", response_body_);
             // Open the standalone GET stream once we have a session (server->client pushes).
-            if (!sse_open_ && !session_id_.empty()) {
+            if (!sse_open_ && !session_id_snapshot().empty()) {
                 start_sse_get();
             }
             return;
@@ -290,7 +304,7 @@ void HttpClientTransport::handle_response() {
                 }
                 // First successful POST: the session exists now — open the GET
                 // SSE stream for server-initiated pushes.
-                if (!sse_open_ && !session_id_.empty()) {
+                if (!sse_open_ && !session_id_snapshot().empty()) {
                     start_sse_get();
                 }
             } catch (const std::exception& e) {
@@ -342,7 +356,7 @@ void HttpClientTransport::handle_response() {
 // --- GET SSE stream (server -> client pushes) ---
 
 void HttpClientTransport::start_sse_get() {
-    if (sse_open_ || stopping_.load() || !io_ctx_ || session_id_.empty()) {
+    if (sse_open_ || stopping_.load() || !io_ctx_ || session_id_snapshot().empty()) {
         return;
     }
     sse_open_ = true;  // reserve: no concurrent opens
@@ -368,7 +382,7 @@ void HttpClientTransport::start_sse_get() {
                     std::string req = "GET " + self->endpoint_ + " HTTP/1.1\r\n";
                     req += "Host: " + self->host_ + ":" + std::to_string(self->port_) + "\r\n";
                     req += "Accept: text/event-stream\r\n";
-                    req += "Mcp-Session-Id: " + self->session_id_ + "\r\n";
+                    req += "Mcp-Session-Id: " + self->session_id_snapshot() + "\r\n";
                     for (const auto& [k, v] : self->extra_headers_) {
                         req += k + ": " + v + "\r\n";
                     }

@@ -54,8 +54,10 @@ void McpClient::set_callback_executor(asio::any_io_executor executor) {
 }
 
 void McpClient::use_transport(std::shared_ptr<IClientTransport> transport) {
-    if (running_.load()) {
-        AsyncLogger::instance().log("McpClient: use_transport ignored - client already started");
+    // Guard against swapping the transport under a live connection, but allow
+    // it after disconnect(): reconnect-to-a-different-server is documented.
+    if (running_.load() && connected_.load()) {
+        AsyncLogger::instance().log("McpClient: use_transport ignored - client is connected");
         return;
     }
     transport_ = std::move(transport);
@@ -77,8 +79,16 @@ void McpClient::ensure_started() {
     if (owns_io_context_) {
         auto self = shared_from_this();
         io_thread_ = std::thread([self]() {
-            asio::error_code ec;
-            self->io_ptr_->run(ec);
+            try {
+                asio::error_code ec;
+                self->io_ptr_->run(ec);
+            } catch (const std::exception& e) {
+                // e.g. streambuf length_error from a misbehaving peer hitting
+                // the read cap mid-read: log and let the thread exit cleanly
+                // instead of terminating the process.
+                AsyncLogger::instance().log(std::string("McpClient io loop died: ") + e.what());
+                self->on_transport_disconnect();
+            }
         });
     }
 }
@@ -192,9 +202,14 @@ std::shared_ptr<PendingRequest> McpClient::submit_request(
     std::optional<RequestId> progress_token_opt) {
 
     // Fast-fail on a dead connection instead of queueing into a void.
-    if (!connected_.load() && method != Protocol::METHOD_INITIALIZE) {
+    // stopping_ matters too: with only the connected_ check, a send racing a
+    // stop() could register on the strand AFTER the drain task ran (strand
+    // FIFO) — its promise would never be set and get() would hang forever.
+    if (stopping_.load() ||
+        (!connected_.load() && method != Protocol::METHOD_INITIALIZE)) {
         throw McpException(Protocol::CLIENT_NOT_CONNECTED,
-                           "client is not connected (connect() first)");
+                           stopping_.load() ? "client is shutting down"
+                                            : "client is not connected (connect() first)");
     }
     if (timeout.count() <= 0 && default_timeout_.count() > 0) {
         timeout = default_timeout_;
@@ -620,12 +635,15 @@ void McpClient::drain_pending(const std::string& reason) {
         fail_all_pending(reason);
         return;
     }
-    std::promise<void> drained;
-    auto f = drained.get_future();
-    asio::post(*strand_, [self, &drained, &reason]() {
+    // Shared promise captured BY VALUE: on an external io loop this post may
+    // outlive the caller's wait window (bounded below) — a stack promise
+    // would leave the stranded lambda writing a dangling object.
+    auto drained = std::make_shared<std::promise<void>>();
+    auto f = drained->get_future();
+    asio::post(*strand_, [self, drained, reason]() {
         self->connected_.store(false);
         self->fail_all_pending(reason);
-        drained.set_value();
+        drained->set_value();
     });
     if (owns_io_context_) {
         // The io thread stays alive until stop() resets the work guard, so

@@ -212,9 +212,21 @@ void McpServer::run() {
 
     std::vector<std::thread> io_pool;
     for (std::size_t i = 1; i < configured_io_threads_; ++i) {
-        io_pool.emplace_back([this]() { io_ctx_.run(); });
+        io_pool.emplace_back([this]() {
+            try {
+                io_ctx_.run();
+            } catch (const std::exception& e) {
+                // A peer tripping a streambuf hard cap mid-read throws
+                // length_error from inside asio; log instead of terminating.
+                log_("error", std::string("io loop died: ") + e.what());
+            }
+        });
     }
-    io_ctx_.run();  // main thread also runs the loop
+    try {
+        io_ctx_.run();  // main thread also runs the loop
+    } catch (const std::exception& e) {
+        log_("error", std::string("io loop died: ") + e.what());
+    }
     for (auto& t : io_pool) {
         if (t.joinable()) {
             t.join();
@@ -270,6 +282,15 @@ void McpServer::end_batch_dispatch() { g_batch_dispatch = false; }
 // RFC 6570 subset: translate "weather://{city}/current" into a regex with
 // named captures for each {var} (unreserved + pct-encoded chars allowed).
 std::regex uri_template_to_regex(const std::string& tpl) {
+    // Escape every regex metachar in literal segments: RFC 6570 literals may
+    // legally contain ( ) * + ? [ ] { } | ^ $ \ — unescaped, an unbalanced
+    // bracket throws regex_error and a balanced group shifts the variable
+    // capture alignment (handler would receive wrong values).
+    auto is_meta = [](char c) {
+        return c == '.' || c == '+' || c == '*' || c == '?' ||
+               c == '(' || c == ')' || c == '[' || c == ']' ||
+               c == '{' || c == '}' || c == '|' || c == '^' || c == '$' || c == '\\';
+    };
     std::string pattern;
     pattern += "^";
     std::string var;
@@ -285,8 +306,9 @@ std::regex uri_template_to_regex(const std::string& tpl) {
             in_var = false;
         } else if (in_var) {
             var += c;
-        } else if (c == '.') {
-            pattern += "\\.";
+        } else if (is_meta(c)) {
+            pattern += '\\';
+            pattern += c;
         } else {
             pattern += c;
         }

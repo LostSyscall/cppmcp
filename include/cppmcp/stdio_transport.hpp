@@ -44,13 +44,13 @@ private:
     // When stdin is a pipe (FILE_TYPE_PIPE), we drive it overlapped via asio
     // (no reader thread). Null when we fell back to the console reader thread.
     std::unique_ptr<asio::windows::stream_handle> stdin_handle_;
-    asio::streambuf read_buf_;
+    asio::streambuf read_buf_{64 * 1024 * 1024};  // hard cap; watermark check drops oversized peers first
     bool use_async_stdin_ = false;
     std::thread win32_reader_thread_;
 #else
     asio::io_context* io_ctx_ = nullptr;
     std::unique_ptr<asio::posix::stream_descriptor> stdin_desc_;
-    asio::streambuf read_buf_;
+    asio::streambuf read_buf_{64 * 1024 * 1024};  // hard cap; watermark check drops oversized peers first
 #endif
 
     std::atomic<bool> running_{false};
