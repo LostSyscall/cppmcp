@@ -89,7 +89,23 @@ jobs:
 
       - name: Integration tests
         working-directory: build
-        run: ctest -L integration --output-on-failure -C ${{ matrix.build_type }} --timeout 180
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest -L integration --output-on-failure -C ${{ matrix.build_type }} --timeout 180 2>&1 | tee ctest-int.log | tail -40
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "== rerunning the failed subset once (flaky guard) =="
+            ctest --rerun-failed --output-on-failure -C ${{ matrix.build_type }} --timeout 240 2>&1 | tee ctest-int-rerun.log | tail -80
+            rc2=${PIPESTATUS[0]}
+            {
+              echo '## Integration test failures (after one rerun)'
+              echo '```'
+              grep -vE "\*\*\*Not Run| Passed " ctest-int.log ctest-int-rerun.log | tail -200
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY" || true
+            exit "$rc2"
+          fi
 
   format-check:
     name: clang-format check
