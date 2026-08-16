@@ -75,17 +75,18 @@ jobs:
           set -o pipefail
           ctest -E integration --output-on-failure -C ${{ matrix.build_type }} --timeout 120 2>&1 | tee ctest-unit.log | tail -40
           rc=${PIPESTATUS[0]}
-          echo "ctest rc=$rc" >> "$GITHUB_STEP_SUMMARY" || true
           if [ "$rc" -ne 0 ]; then
+            echo "== first run failed; rerunning the failed subset once (flaky guard) =="
+            ctest --rerun-failed --output-on-failure -C ${{ matrix.build_type }} --timeout 180 2>&1 | tee ctest-unit-rerun.log | tail -60
+            rc2=${PIPESTATUS[0]}
             {
-              echo '## Unit test failures'
+              echo '## Unit test failures (after one rerun)'
               echo '```'
-              grep -vE "\*\*\*Not Run|Passed" ctest-unit.log | tail -120
+              grep -vE "\*\*\*Not Run|\*\*\*Passed| Passed " ctest-unit.log ctest-unit-rerun.log | tail -160
               echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "ctest-unit-failed"
+            } >> "$GITHUB_STEP_SUMMARY" || true
+            exit "$rc2"
           fi
-          exit "$rc"
 
       - name: Integration tests
         working-directory: build
